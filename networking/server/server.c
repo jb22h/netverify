@@ -60,23 +60,29 @@ int main(void)
     if (n == 0) {
         fprintf(stderr, "client closed the connection\n");
     } else {
+        if (n != 4 || memcmp(buffer, "PING", 4) != 0) {
+            fprintf(stderr, "invalid request\n");
+            close(client_fd);
+            close(server_fd);
+            return EXIT_FAILURE;
+        }
+
         buffer[n] = '\0';
         printf("%s\n", buffer);
 
         ssize_t sent = send(client_fd, "PONG", 4, 0);
-if (sent == -1) {
-    perror("send");
-    close(client_fd);
-    close(server_fd);
-    return EXIT_FAILURE;
-}
-
-if (sent != 4) {
-    fprintf(stderr, "send: incomplete write\n");
-    close(client_fd);
-    close(server_fd);
-    return EXIT_FAILURE;
-}
+        if (sent == -1) {
+            perror("send");
+            close(client_fd);
+            close(server_fd);
+            return EXIT_FAILURE;
+        }
+        if (sent != 4) {
+            fprintf(stderr, "send: incomplete write\n");
+            close(client_fd);
+            close(server_fd);
+            return EXIT_FAILURE;
+        }
     }
 
     close(client_fd);
