@@ -33,6 +33,12 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+    if (listen(server_fd, 10) == -1) {
+        perror("listen");
+        close(server_fd);
+        return EXIT_FAILURE;
+    }
+
     close(server_fd);
 
     return EXIT_SUCCESS;
