@@ -49,6 +49,21 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+    char buffer[64];
+    ssize_t n = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+    if (n == -1) {
+        perror("recv");
+        close(client_fd);
+        close(server_fd);
+        return EXIT_FAILURE;
+    }
+    if (n == 0) {
+        fprintf(stderr, "client closed the connection\n");
+    } else {
+        buffer[n] = '\0';
+        printf("%s\n", buffer);
+    }
+
     close(client_fd);
     close(server_fd);
 
