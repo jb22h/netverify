@@ -10,7 +10,10 @@
 int main(void)
 {
     int server_fd;
+    int client_fd;
     struct sockaddr_in addr;
+    struct sockaddr_in client_addr;
+    socklen_t client_addr_len = sizeof(client_addr);
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
@@ -39,6 +42,14 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+    client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+    if (client_fd == -1) {
+        perror("accept");
+        close(server_fd);
+        return EXIT_FAILURE;
+    }
+
+    close(client_fd);
     close(server_fd);
 
     return EXIT_SUCCESS;
