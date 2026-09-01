@@ -1030,24 +1030,34 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 0 — Environment and Repository`
+`Phase 2 — Protocol and Multiple Messages` (next)
 
 Completed:
+
+**Phase 0 — Environment and Repository**
 - WSL2 installed
 - Ubuntu installed
 - Git installed
 - Development environment prepared
 - Cursor available
 - OpenCode available
+- NetVerify repository created
+- PROJECT_SPEC.md added
+- GCC verified
+
+**Phase 1 — Minimal TCP Client and Server in C**
+- Minimal TCP server in C
+- Minimal TCP client in C
+- bind/listen/accept
+- PING/PONG send and receive
+- Basic PING/PONG validation
+- Makefile build and clean targets
 
 Next:
-- Create NetVerify repository
-- Add PROJECT_SPEC.md
-- Verify GCC
-- Create first C TCP server/client milestone
+- Begin Phase 2 — Protocol and Multiple Messages
 
 Last updated:
-2026-09-01
+2026-09-02
 
 ---
 
