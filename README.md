@@ -1,45 +1,75 @@
 # NetVerify
 
-NetVerify is a network verification and test automation platform that runs repeatable TCP/network tests, injects network failures, collects logs and performance metrics, and determines whether the tested system behaves correctly.
+NetVerify is a network verification and test automation platform that runs repeatable TCP/network tests, collects logs and performance metrics, and determines whether the tested system behaves correctly.
 
 ## Current Status
 
 - **Phase 0** — Environment and Repository: complete
-- **Phase 1** — Minimal TCP Client and Server in C: next
+- **Phase 1** — Minimal TCP Client and Server in C: complete
+
+Phase 1 delivers a minimal TCP client and server in C. The server listens on `127.0.0.1:9000`, validates an incoming `PING` request, and responds with `PONG`. The client connects, sends `PING`, receives the response, and validates `PONG`.
 
 ## Directory Layout
 
 ```text
 netverify/
 ├── networking/
-│   ├── client/          # C TCP client
-│   └── server/          # C TCP server
-├── docs/                # Architecture and design notes
-├── runner/              # Python test automation (later)
-├── backend/             # Java Spring Boot control plane (later)
-├── frontend/            # React + TypeScript dashboard (later)
-├── scripts/             # Utility scripts (later)
-├── tests/               # Test suites (later)
-├── docker/              # Container setup (later)
-├── PROJECT_SPEC.md      # Master project specification
+│   ├── client/
+│   │   └── client.c
+│   └── server/
+│       └── server.c
+├── Makefile
+├── PROJECT_SPEC.md
 └── README.md
 ```
 
-Not all directories exist yet. See [PROJECT_SPEC.md](PROJECT_SPEC.md) for the full roadmap.
+See [PROJECT_SPEC.md](PROJECT_SPEC.md) for the full roadmap.
 
 ## Prerequisites
 
-Verified on this development machine:
+- Linux (WSL2 / Ubuntu)
+- GCC
+- GNU Make
 
-- WSL2 / Ubuntu
-- Git
-- GCC 15.2.0
-- GNU Make 4.4.1
+## Build
 
-## Build and Run
+```bash
+make
+```
 
-_To be added in Phase 1._
+This produces `net_server` and `net_client`.
+
+## Run
+
+Use two terminals from the project root.
+
+**Terminal 1:**
+
+```bash
+./net_server
+```
+
+**Terminal 2:**
+
+```bash
+./net_client
+```
+
+**Expected output:**
+
+```text
+Server: PING
+Client: PONG
+```
+
+## Clean
+
+```bash
+make clean
+```
+
+Removes `net_server` and `net_client`.
 
 ## Full Roadmap
 
-See [PROJECT_SPEC.md](PROJECT_SPEC.md) for the complete development plan, technology stack, and phase-by-phase milestones.
+See [PROJECT_SPEC.md](PROJECT_SPEC.md) for the complete development plan and future phases.
