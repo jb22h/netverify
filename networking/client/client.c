@@ -33,6 +33,18 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+    ssize_t sent = send(sock_fd, "PING", 4, 0);
+    if (sent == -1) {
+        perror("send");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+    if (sent != 4) {
+        fprintf(stderr, "send: incomplete write\n");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+
     close(sock_fd);
 
     return EXIT_SUCCESS;
