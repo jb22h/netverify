@@ -62,6 +62,21 @@ int main(void)
     } else {
         buffer[n] = '\0';
         printf("%s\n", buffer);
+
+        ssize_t sent = send(client_fd, "PONG", 4, 0);
+if (sent == -1) {
+    perror("send");
+    close(client_fd);
+    close(server_fd);
+    return EXIT_FAILURE;
+}
+
+if (sent != 4) {
+    fprintf(stderr, "send: incomplete write\n");
+    close(client_fd);
+    close(server_fd);
+    return EXIT_FAILURE;
+}
     }
 
     close(client_fd);
