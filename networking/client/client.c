@@ -1,16 +1,37 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
+#include <stdint.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-int main(void)
+int main(int argc, char *argv[])
 {
     int sock_fd;
     struct sockaddr_in addr;
+
+    if (argc != 5) {
+        fprintf(stderr, "usage: ./net_client --host <host> --port <port>\n");
+        return EXIT_FAILURE;
+    }
+
+    if (strcmp(argv[1], "--host") != 0 || strcmp(argv[3], "--port") != 0) {
+        fprintf(stderr, "usage: ./net_client --host <host> --port <port>\n");
+        return EXIT_FAILURE;
+    }
+
+    const char *host = argv[2];
+
+    char *end;
+    errno = 0;
+    long port = strtol(argv[4], &end, 10);
+    if (errno != 0 || end == argv[4] || *end != '\0' || port < 1 || port > 65535) {
+        fprintf(stderr, "error: invalid port '%s'\n", argv[4]);
+        return EXIT_FAILURE;
+    }
 
     sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd == -1) {
@@ -20,8 +41,8 @@ int main(void)
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(9000);
-    if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
+    addr.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
         fprintf(stderr, "inet_pton: invalid address\n");
         close(sock_fd);
         return EXIT_FAILURE;
