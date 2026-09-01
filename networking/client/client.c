@@ -45,6 +45,22 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+    char buffer[64];
+    ssize_t n = recv(sock_fd, buffer, sizeof(buffer) - 1, 0);
+    if (n == -1) {
+        perror("recv");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+    if (n == 0) {
+        fprintf(stderr, "server closed the connection before sending a response\n");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+
+    buffer[n] = '\0';
+    printf("%s\n", buffer);
+
     close(sock_fd);
 
     return EXIT_SUCCESS;
