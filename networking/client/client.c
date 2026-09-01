@@ -58,6 +58,12 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+    if (n != 4 || memcmp(buffer, "PONG", 4) != 0) {
+        fprintf(stderr, "invalid response\n");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+
     buffer[n] = '\0';
     printf("%s\n", buffer);
 
