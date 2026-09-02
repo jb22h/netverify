@@ -13,13 +13,14 @@ int main(int argc, char *argv[])
     int sock_fd;
     struct sockaddr_in addr;
 
-    if (argc != 5) {
-        fprintf(stderr, "usage: ./net_client --host <host> --port <port>\n");
+    if (argc != 7) {
+        fprintf(stderr, "usage: ./net_client --host <host> --port <port> --count <count>\n");
         return EXIT_FAILURE;
     }
 
-    if (strcmp(argv[1], "--host") != 0 || strcmp(argv[3], "--port") != 0) {
-        fprintf(stderr, "usage: ./net_client --host <host> --port <port>\n");
+    if (strcmp(argv[1], "--host") != 0 || strcmp(argv[3], "--port") != 0 ||
+        strcmp(argv[5], "--count") != 0) {
+        fprintf(stderr, "usage: ./net_client --host <host> --port <port> --count <count>\n");
         return EXIT_FAILURE;
     }
 
@@ -30,6 +31,13 @@ int main(int argc, char *argv[])
     long port = strtol(argv[4], &end, 10);
     if (errno != 0 || end == argv[4] || *end != '\0' || port < 1 || port > 65535) {
         fprintf(stderr, "error: invalid port '%s'\n", argv[4]);
+        return EXIT_FAILURE;
+    }
+
+    errno = 0;
+    long count = strtol(argv[6], &end, 10);
+    if (errno != 0 || end == argv[6] || *end != '\0' || count < 1 || count > 1000000) {
+        fprintf(stderr, "error: invalid count '%s'\n", argv[6]);
         return EXIT_FAILURE;
     }
 
@@ -59,7 +67,7 @@ if (sock_fd == -1) {
 
     char buffer[64];
 
-    for (long sent_seq = 1; sent_seq <= 3; sent_seq++) {
+    for (long sent_seq = 1; sent_seq <= count; sent_seq++) {
         char request[64];
         int req_written = snprintf(request, sizeof(request), "PING %ld\n", sent_seq);
         if (req_written < 0 || (size_t)req_written >= sizeof(request)) {
