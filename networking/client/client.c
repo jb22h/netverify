@@ -23,6 +23,30 @@ static int64_t timespec_diff_us(const struct timespec *start, const struct times
     return sec * 1000000L + nsec / 1000;
 }
 
+static int send_all(int fd, const char *buffer, size_t length)
+{
+    size_t remaining = length;
+
+    while (remaining > 0) {
+        ssize_t sent = send(fd, buffer, remaining, 0);
+        if (sent == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("send");
+            return -1;
+        }
+        if (sent == 0) {
+            fprintf(stderr, "send: connection closed\n");
+            return -1;
+        }
+        buffer += sent;
+        remaining -= (size_t)sent;
+    }
+
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     int sock_fd;
@@ -102,14 +126,7 @@ if (sock_fd == -1) {
             return EXIT_FAILURE;
         }
 
-        ssize_t sent = send(sock_fd, request, (size_t)req_written, 0);
-        if (sent == -1) {
-            perror("send");
-            close(sock_fd);
-            return EXIT_FAILURE;
-        }
-        if (sent != req_written) {
-            fprintf(stderr, "send: incomplete write\n");
+        if (send_all(sock_fd, request, (size_t)req_written) == -1) {
             close(sock_fd);
             return EXIT_FAILURE;
         }
@@ -183,14 +200,7 @@ if (sock_fd == -1) {
         printf("%s\n", buffer);
     }
 
-    ssize_t sent = send(sock_fd, "QUIT\n", 5, 0);
-    if (sent == -1) {
-        perror("send");
-        close(sock_fd);
-        return EXIT_FAILURE;
-    }
-    if (sent != 5) {
-        fprintf(stderr, "send: incomplete write\n");
+    if (send_all(sock_fd, "QUIT\n", 5) == -1) {
         close(sock_fd);
         return EXIT_FAILURE;
     }

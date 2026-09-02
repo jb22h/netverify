@@ -8,6 +8,30 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+static int send_all(int fd, const char *buffer, size_t length)
+{
+    size_t remaining = length;
+
+    while (remaining > 0) {
+        ssize_t sent = send(fd, buffer, remaining, 0);
+        if (sent == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("send");
+            return -1;
+        }
+        if (sent == 0) {
+            fprintf(stderr, "send: connection closed\n");
+            return -1;
+        }
+        buffer += sent;
+        remaining -= (size_t)sent;
+    }
+
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     int server_fd;
@@ -113,15 +137,7 @@ int main(int argc, char *argv[])
         }
 
         if (strcmp(buffer, "QUIT") == 0) {
-            ssize_t sent = send(client_fd, "BYE\n", 4, 0);
-            if (sent == -1) {
-                perror("send");
-                close(client_fd);
-                close(server_fd);
-                return EXIT_FAILURE;
-            }
-            if (sent != 4) {
-                fprintf(stderr, "send: incomplete write\n");
+            if (send_all(client_fd, "BYE\n", 4) == -1) {
                 close(client_fd);
                 close(server_fd);
                 return EXIT_FAILURE;
@@ -165,15 +181,7 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        ssize_t sent = send(client_fd, response, (size_t)written, 0);
-        if (sent == -1) {
-            perror("send");
-            close(client_fd);
-            close(server_fd);
-            return EXIT_FAILURE;
-        }
-        if (sent != written) {
-            fprintf(stderr, "send: incomplete write\n");
+        if (send_all(client_fd, response, (size_t)written) == -1) {
             close(client_fd);
             close(server_fd);
             return EXIT_FAILURE;
