@@ -57,13 +57,23 @@ if (sock_fd == -1) {
         return EXIT_FAILURE;
     }
 
-    ssize_t sent = send(sock_fd, "PING\n", 5, 0);
+    const long sent_seq = 1;
+
+    char request[64];
+    int req_written = snprintf(request, sizeof(request), "PING %ld\n", sent_seq);
+    if (req_written < 0 || (size_t)req_written >= sizeof(request)) {
+        fprintf(stderr, "request formatting failed\n");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+
+    ssize_t sent = send(sock_fd, request, (size_t)req_written, 0);
     if (sent == -1) {
         perror("send");
         close(sock_fd);
         return EXIT_FAILURE;
     }
-    if (sent != 5) {
+    if (sent != req_written) {
         fprintf(stderr, "send: incomplete write\n");
         close(sock_fd);
         return EXIT_FAILURE;
@@ -97,8 +107,24 @@ if (sock_fd == -1) {
         buffer[len++] = c;
     }
 
-    if (strcmp(buffer, "PONG") != 0) {
+    const char *prefix = "PONG ";
+    if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
         fprintf(stderr, "invalid response\n");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+
+    char *seq_start = buffer + strlen(prefix);
+    errno = 0;
+    long recv_seq = strtol(seq_start, &end, 10);
+    if (errno != 0 || end == seq_start || *end != '\0' || recv_seq < 1) {
+        fprintf(stderr, "invalid response\n");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+
+    if (recv_seq != sent_seq) {
+        fprintf(stderr, "unexpected sequence\n");
         close(sock_fd);
         return EXIT_FAILURE;
     }
