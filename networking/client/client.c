@@ -57,79 +57,80 @@ if (sock_fd == -1) {
         return EXIT_FAILURE;
     }
 
-    const long sent_seq = 1;
-
-    char request[64];
-    int req_written = snprintf(request, sizeof(request), "PING %ld\n", sent_seq);
-    if (req_written < 0 || (size_t)req_written >= sizeof(request)) {
-        fprintf(stderr, "request formatting failed\n");
-        close(sock_fd);
-        return EXIT_FAILURE;
-    }
-
-    ssize_t sent = send(sock_fd, request, (size_t)req_written, 0);
-    if (sent == -1) {
-        perror("send");
-        close(sock_fd);
-        return EXIT_FAILURE;
-    }
-    if (sent != req_written) {
-        fprintf(stderr, "send: incomplete write\n");
-        close(sock_fd);
-        return EXIT_FAILURE;
-    }
-
     char buffer[64];
-    size_t len = 0;
 
-    for (;;) {
-        char c;
-        ssize_t n = recv(sock_fd, &c, 1, 0);
-        if (n == -1) {
-            perror("recv");
+    for (long sent_seq = 1; sent_seq <= 3; sent_seq++) {
+        char request[64];
+        int req_written = snprintf(request, sizeof(request), "PING %ld\n", sent_seq);
+        if (req_written < 0 || (size_t)req_written >= sizeof(request)) {
+            fprintf(stderr, "request formatting failed\n");
             close(sock_fd);
             return EXIT_FAILURE;
         }
-        if (n == 0) {
-            fprintf(stderr, "incomplete response\n");
+
+        ssize_t sent = send(sock_fd, request, (size_t)req_written, 0);
+        if (sent == -1) {
+            perror("send");
             close(sock_fd);
             return EXIT_FAILURE;
         }
-        if (c == '\n') {
-            buffer[len] = '\0';
-            break;
-        }
-        if (len >= sizeof(buffer) - 1) {
-            fprintf(stderr, "response too long\n");
+        if (sent != req_written) {
+            fprintf(stderr, "send: incomplete write\n");
             close(sock_fd);
             return EXIT_FAILURE;
         }
-        buffer[len++] = c;
-    }
 
-    const char *prefix = "PONG ";
-    if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
-        fprintf(stderr, "invalid response\n");
-        close(sock_fd);
-        return EXIT_FAILURE;
-    }
+        size_t len = 0;
 
-    char *seq_start = buffer + strlen(prefix);
-    errno = 0;
-    long recv_seq = strtol(seq_start, &end, 10);
-    if (errno != 0 || end == seq_start || *end != '\0' || recv_seq < 1) {
-        fprintf(stderr, "invalid response\n");
-        close(sock_fd);
-        return EXIT_FAILURE;
-    }
+        for (;;) {
+            char c;
+            ssize_t n = recv(sock_fd, &c, 1, 0);
+            if (n == -1) {
+                perror("recv");
+                close(sock_fd);
+                return EXIT_FAILURE;
+            }
+            if (n == 0) {
+                fprintf(stderr, "incomplete response\n");
+                close(sock_fd);
+                return EXIT_FAILURE;
+            }
+            if (c == '\n') {
+                buffer[len] = '\0';
+                break;
+            }
+            if (len >= sizeof(buffer) - 1) {
+                fprintf(stderr, "response too long\n");
+                close(sock_fd);
+                return EXIT_FAILURE;
+            }
+            buffer[len++] = c;
+        }
 
-    if (recv_seq != sent_seq) {
-        fprintf(stderr, "unexpected sequence\n");
-        close(sock_fd);
-        return EXIT_FAILURE;
-    }
+        const char *prefix = "PONG ";
+        if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
+            fprintf(stderr, "invalid response\n");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
 
-    printf("%s\n", buffer);
+        char *seq_start = buffer + strlen(prefix);
+        errno = 0;
+        long recv_seq = strtol(seq_start, &end, 10);
+        if (errno != 0 || end == seq_start || *end != '\0' || recv_seq < 1) {
+            fprintf(stderr, "invalid response\n");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+
+        if (recv_seq != sent_seq) {
+            fprintf(stderr, "unexpected sequence\n");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+
+        printf("%s\n", buffer);
+    }
 
     close(sock_fd);
 
