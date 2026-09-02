@@ -69,79 +69,104 @@ int main(int argc, char *argv[])
     }
 
     char buffer[64];
-    size_t len = 0;
+    long expected_seq = 1;
+    int completed_exchanges = 0;
 
     for (;;) {
-        char c;
-        ssize_t n = recv(client_fd, &c, 1, 0);
-        if (n == -1) {
-            perror("recv");
+        size_t len = 0;
+
+        for (;;) {
+            char c;
+            ssize_t n = recv(client_fd, &c, 1, 0);
+            if (n == -1) {
+                perror("recv");
+                close(client_fd);
+                close(server_fd);
+                return EXIT_FAILURE;
+            }
+            if (n == 0) {
+                if (len > 0) {
+                    fprintf(stderr, "incomplete request\n");
+                    close(client_fd);
+                    close(server_fd);
+                    return EXIT_FAILURE;
+                }
+                if (completed_exchanges == 0) {
+                    fprintf(stderr, "client closed before sending a request\n");
+                    close(client_fd);
+                    close(server_fd);
+                    return EXIT_FAILURE;
+                }
+                goto session_done;
+            }
+            if (c == '\n') {
+                buffer[len] = '\0';
+                break;
+            }
+            if (len >= sizeof(buffer) - 1) {
+                fprintf(stderr, "message too long\n");
+                close(client_fd);
+                close(server_fd);
+                return EXIT_FAILURE;
+            }
+            buffer[len++] = c;
+        }
+
+        const char *prefix = "PING ";
+        if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
+            fprintf(stderr, "invalid request\n");
             close(client_fd);
             close(server_fd);
             return EXIT_FAILURE;
         }
-        if (n == 0) {
-            fprintf(stderr, "incomplete request\n");
+
+        char *seq_start = buffer + strlen(prefix);
+        errno = 0;
+        long seq = strtol(seq_start, &end, 10);
+        if (errno != 0 || end == seq_start || *end != '\0' || seq < 1) {
+            fprintf(stderr, "invalid request\n");
             close(client_fd);
             close(server_fd);
             return EXIT_FAILURE;
         }
-        if (c == '\n') {
-            buffer[len] = '\0';
-            break;
-        }
-        if (len >= sizeof(buffer) - 1) {
-            fprintf(stderr, "message too long\n");
+
+        if (seq != expected_seq) {
+            fprintf(stderr, "unexpected sequence\n");
             close(client_fd);
             close(server_fd);
             return EXIT_FAILURE;
         }
-        buffer[len++] = c;
+
+        printf("%s\n", buffer);
+
+        char response[64];
+        int written = snprintf(response, sizeof(response), "PONG %ld\n", seq);
+        if (written < 0 || (size_t)written >= sizeof(response)) {
+            fprintf(stderr, "response formatting failed\n");
+            close(client_fd);
+            close(server_fd);
+            return EXIT_FAILURE;
+        }
+
+        ssize_t sent = send(client_fd, response, (size_t)written, 0);
+        if (sent == -1) {
+            perror("send");
+            close(client_fd);
+            close(server_fd);
+            return EXIT_FAILURE;
+        }
+        if (sent != written) {
+            fprintf(stderr, "send: incomplete write\n");
+            close(client_fd);
+            close(server_fd);
+            return EXIT_FAILURE;
+        }
+
+        expected_seq++;
+        completed_exchanges++;
     }
 
-    const char *prefix = "PING ";
-    if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
-        fprintf(stderr, "invalid request\n");
-        close(client_fd);
-        close(server_fd);
-        return EXIT_FAILURE;
-    }
-
-    char *seq_start = buffer + strlen(prefix);
-    errno = 0;
-    long seq = strtol(seq_start, &end, 10);
-    if (errno != 0 || end == seq_start || *end != '\0' || seq < 1) {
-        fprintf(stderr, "invalid request\n");
-        close(client_fd);
-        close(server_fd);
-        return EXIT_FAILURE;
-    }
-
-    printf("%s\n", buffer);
-
-    char response[64];
-    int written = snprintf(response, sizeof(response), "PONG %ld\n", seq);
-    if (written < 0 || (size_t)written >= sizeof(response)) {
-        fprintf(stderr, "response formatting failed\n");
-        close(client_fd);
-        close(server_fd);
-        return EXIT_FAILURE;
-    }
-
-    ssize_t sent = send(client_fd, response, (size_t)written, 0);
-    if (sent == -1) {
-        perror("send");
-        close(client_fd);
-        close(server_fd);
-        return EXIT_FAILURE;
-    }
-    if (sent != written) {
-        fprintf(stderr, "send: incomplete write\n");
-        close(client_fd);
-        close(server_fd);
-        return EXIT_FAILURE;
-    }
-
+session_done:
     close(client_fd);
     close(server_fd);
 
