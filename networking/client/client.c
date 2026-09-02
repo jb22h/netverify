@@ -140,6 +140,51 @@ if (sock_fd == -1) {
         printf("%s\n", buffer);
     }
 
+    ssize_t sent = send(sock_fd, "QUIT\n", 5, 0);
+    if (sent == -1) {
+        perror("send");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+    if (sent != 5) {
+        fprintf(stderr, "send: incomplete write\n");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+
+    size_t len = 0;
+
+    for (;;) {
+        char c;
+        ssize_t n = recv(sock_fd, &c, 1, 0);
+        if (n == -1) {
+            perror("recv");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+        if (n == 0) {
+            fprintf(stderr, "incomplete response\n");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+        if (c == '\n') {
+            buffer[len] = '\0';
+            break;
+        }
+        if (len >= sizeof(buffer) - 1) {
+            fprintf(stderr, "response too long\n");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+        buffer[len++] = c;
+    }
+
+    if (strcmp(buffer, "BYE") != 0) {
+        fprintf(stderr, "invalid response\n");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+
     close(sock_fd);
 
     return EXIT_SUCCESS;
