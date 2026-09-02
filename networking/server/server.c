@@ -112,6 +112,23 @@ int main(int argc, char *argv[])
             buffer[len++] = c;
         }
 
+        if (strcmp(buffer, "QUIT") == 0) {
+            ssize_t sent = send(client_fd, "BYE\n", 4, 0);
+            if (sent == -1) {
+                perror("send");
+                close(client_fd);
+                close(server_fd);
+                return EXIT_FAILURE;
+            }
+            if (sent != 4) {
+                fprintf(stderr, "send: incomplete write\n");
+                close(client_fd);
+                close(server_fd);
+                return EXIT_FAILURE;
+            }
+            goto session_done;
+        }
+
         const char *prefix = "PING ";
         if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
             fprintf(stderr, "invalid request\n");
