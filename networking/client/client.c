@@ -1,12 +1,27 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+
+static int64_t timespec_diff_us(const struct timespec *start, const struct timespec *end)
+{
+    int64_t sec = (int64_t)(end->tv_sec - start->tv_sec);
+    int64_t nsec = (int64_t)(end->tv_nsec - start->tv_nsec);
+    if (nsec < 0) {
+        sec--;
+        nsec += 1000000000L;
+    }
+    return sec * 1000000L + nsec / 1000;
+}
 
 int main(int argc, char *argv[])
 {
@@ -66,12 +81,23 @@ if (sock_fd == -1) {
     }
 
     char buffer[64];
+    int64_t completed_exchanges = 0;
+    int64_t min_rtt_us = INT64_MAX;
+    int64_t max_rtt_us = 0;
+    int64_t total_rtt_us = 0;
 
     for (long sent_seq = 1; sent_seq <= count; sent_seq++) {
         char request[64];
         int req_written = snprintf(request, sizeof(request), "PING %ld\n", sent_seq);
         if (req_written < 0 || (size_t)req_written >= sizeof(request)) {
             fprintf(stderr, "request formatting failed\n");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+
+        struct timespec start;
+        if (clock_gettime(CLOCK_MONOTONIC, &start) == -1) {
+            perror("clock_gettime");
             close(sock_fd);
             return EXIT_FAILURE;
         }
@@ -137,6 +163,23 @@ if (sock_fd == -1) {
             return EXIT_FAILURE;
         }
 
+        struct timespec end_ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &end_ts) == -1) {
+            perror("clock_gettime");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+
+        int64_t rtt_us = timespec_diff_us(&start, &end_ts);
+        completed_exchanges++;
+        if (rtt_us < min_rtt_us) {
+            min_rtt_us = rtt_us;
+        }
+        if (rtt_us > max_rtt_us) {
+            max_rtt_us = rtt_us;
+        }
+        total_rtt_us += rtt_us;
+
         printf("%s\n", buffer);
     }
 
@@ -184,6 +227,12 @@ if (sock_fd == -1) {
         close(sock_fd);
         return EXIT_FAILURE;
     }
+
+    int64_t avg_rtt_us = total_rtt_us / completed_exchanges;
+    printf("exchanges: %" PRId64 "\n", completed_exchanges);
+    printf("rtt_min_us: %" PRId64 "\n", min_rtt_us);
+    printf("rtt_max_us: %" PRId64 "\n", max_rtt_us);
+    printf("rtt_avg_us: %" PRId64 "\n", avg_rtt_us);
 
     close(sock_fd);
 
