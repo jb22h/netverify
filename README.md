@@ -7,7 +7,7 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 0** — Environment and Repository: complete
 - **Phase 1** — Minimal TCP Client and Server in C: complete
 
-Phase 1 delivers a minimal TCP client and server in C. The server listens on `127.0.0.1:9000`, validates an incoming `PING` request, and responds with `PONG`. The client connects, sends `PING`, receives the response, and validates `PONG`.
+Phase 1 delivers a minimal TCP client and server in C. The server listens on `127.0.0.1` using a configurable port, validates an incoming `PING` request, and responds with `PONG`. The client connects to a configurable IPv4 host and port, sends `PING`, receives the response, and validates `PONG`.
 
 ## Directory Layout
 
@@ -46,13 +46,13 @@ Use two terminals from the project root.
 **Terminal 1:**
 
 ```bash
-./net_server
+./net_server --port 9000
 ```
 
 **Terminal 2:**
 
 ```bash
-./net_client
+./net_client --host 127.0.0.1 --port 9000
 ```
 
 **Expected output:**
