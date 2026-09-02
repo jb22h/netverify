@@ -33,20 +33,23 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_fd == -1) {
-        perror("socket");
-        return EXIT_FAILURE;
-    }
-
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-        fprintf(stderr, "inet_pton: invalid address\n");
-        close(sock_fd);
-        return EXIT_FAILURE;
-    }
+
+addr.sin_family = AF_INET;
+
+addr.sin_port = htons((uint16_t)port);
+
+if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+    fprintf(stderr, "inet_pton: invalid address\n");
+    return EXIT_FAILURE;
+}
+
+sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+if (sock_fd == -1) {
+    perror("socket");
+    return EXIT_FAILURE;
+}
 
     if (connect(sock_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
         perror("connect");
@@ -54,38 +57,52 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    ssize_t sent = send(sock_fd, "PING", 4, 0);
+    ssize_t sent = send(sock_fd, "PING\n", 5, 0);
     if (sent == -1) {
         perror("send");
         close(sock_fd);
         return EXIT_FAILURE;
     }
-    if (sent != 4) {
+    if (sent != 5) {
         fprintf(stderr, "send: incomplete write\n");
         close(sock_fd);
         return EXIT_FAILURE;
     }
 
     char buffer[64];
-    ssize_t n = recv(sock_fd, buffer, sizeof(buffer) - 1, 0);
-    if (n == -1) {
-        perror("recv");
-        close(sock_fd);
-        return EXIT_FAILURE;
-    }
-    if (n == 0) {
-        fprintf(stderr, "server closed the connection before sending a response\n");
-        close(sock_fd);
-        return EXIT_FAILURE;
+    size_t len = 0;
+
+    for (;;) {
+        char c;
+        ssize_t n = recv(sock_fd, &c, 1, 0);
+        if (n == -1) {
+            perror("recv");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+        if (n == 0) {
+            fprintf(stderr, "incomplete response\n");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+        if (c == '\n') {
+            buffer[len] = '\0';
+            break;
+        }
+        if (len >= sizeof(buffer) - 1) {
+            fprintf(stderr, "response too long\n");
+            close(sock_fd);
+            return EXIT_FAILURE;
+        }
+        buffer[len++] = c;
     }
 
-    if (n != 4 || memcmp(buffer, "PONG", 4) != 0) {
+    if (strcmp(buffer, "PONG") != 0) {
         fprintf(stderr, "invalid response\n");
         close(sock_fd);
         return EXIT_FAILURE;
     }
 
-    buffer[n] = '\0';
     printf("%s\n", buffer);
 
     close(sock_fd);
