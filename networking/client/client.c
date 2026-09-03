@@ -47,6 +47,30 @@ static int send_all(int fd, const char *buffer, size_t length)
     return 0;
 }
 
+static int get_connection_duration_us(const struct timespec *conn_start,
+                                     int64_t *duration_us)
+{
+    struct timespec conn_end;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &conn_end) == -1) {
+        perror("clock_gettime");
+        return -1;
+    }
+    *duration_us = timespec_diff_us(conn_start, &conn_end);
+    return 0;
+}
+
+static void print_session_counters(int64_t messages_sent,
+                                   int64_t messages_received,
+                                   int64_t malformed_messages,
+                                   int64_t duration_us)
+{
+    printf("messages_sent: %" PRId64 "\n", messages_sent);
+    printf("messages_received: %" PRId64 "\n", messages_received);
+    printf("malformed_messages: %" PRId64 "\n", malformed_messages);
+    printf("connection_duration_us: %" PRId64 "\n", duration_us);
+}
+
 int main(int argc, char *argv[])
 {
     int sock_fd;
@@ -82,24 +106,30 @@ int main(int argc, char *argv[])
 
     memset(&addr, 0, sizeof(addr));
 
-addr.sin_family = AF_INET;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
 
-addr.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        fprintf(stderr, "inet_pton: invalid address\n");
+        return EXIT_FAILURE;
+    }
 
-if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-    fprintf(stderr, "inet_pton: invalid address\n");
-    return EXIT_FAILURE;
-}
+    sock_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-
-if (sock_fd == -1) {
-    perror("socket");
-    return EXIT_FAILURE;
-}
+    if (sock_fd == -1) {
+        perror("socket");
+        return EXIT_FAILURE;
+    }
 
     if (connect(sock_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
         perror("connect");
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
+
+    struct timespec conn_start;
+    if (clock_gettime(CLOCK_MONOTONIC, &conn_start) == -1) {
+        perror("clock_gettime");
         close(sock_fd);
         return EXIT_FAILURE;
     }
@@ -109,6 +139,9 @@ if (sock_fd == -1) {
     int64_t min_rtt_us = INT64_MAX;
     int64_t max_rtt_us = 0;
     int64_t total_rtt_us = 0;
+    int64_t messages_sent = 0;
+    int64_t messages_received = 0;
+    int64_t malformed_messages = 0;
 
     for (long sent_seq = 1; sent_seq <= count; sent_seq++) {
         char request[64];
@@ -130,6 +163,7 @@ if (sock_fd == -1) {
             close(sock_fd);
             return EXIT_FAILURE;
         }
+        messages_sent++;
 
         size_t len = 0;
 
@@ -143,6 +177,15 @@ if (sock_fd == -1) {
             }
             if (n == 0) {
                 fprintf(stderr, "incomplete response\n");
+                malformed_messages++;
+                {
+                    int64_t duration_us;
+
+                    if (get_connection_duration_us(&conn_start, &duration_us) == 0) {
+                        print_session_counters(messages_sent, messages_received,
+                                               malformed_messages, duration_us);
+                    }
+                }
                 close(sock_fd);
                 return EXIT_FAILURE;
             }
@@ -152,6 +195,15 @@ if (sock_fd == -1) {
             }
             if (len >= sizeof(buffer) - 1) {
                 fprintf(stderr, "response too long\n");
+                malformed_messages++;
+                {
+                    int64_t duration_us;
+
+                    if (get_connection_duration_us(&conn_start, &duration_us) == 0) {
+                        print_session_counters(messages_sent, messages_received,
+                                               malformed_messages, duration_us);
+                    }
+                }
                 close(sock_fd);
                 return EXIT_FAILURE;
             }
@@ -161,6 +213,15 @@ if (sock_fd == -1) {
         const char *prefix = "PONG ";
         if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
             fprintf(stderr, "invalid response\n");
+            malformed_messages++;
+            {
+                int64_t duration_us;
+
+                if (get_connection_duration_us(&conn_start, &duration_us) == 0) {
+                    print_session_counters(messages_sent, messages_received,
+                                           malformed_messages, duration_us);
+                }
+            }
             close(sock_fd);
             return EXIT_FAILURE;
         }
@@ -170,15 +231,35 @@ if (sock_fd == -1) {
         long recv_seq = strtol(seq_start, &end, 10);
         if (errno != 0 || end == seq_start || *end != '\0' || recv_seq < 1) {
             fprintf(stderr, "invalid response\n");
+            malformed_messages++;
+            {
+                int64_t duration_us;
+
+                if (get_connection_duration_us(&conn_start, &duration_us) == 0) {
+                    print_session_counters(messages_sent, messages_received,
+                                           malformed_messages, duration_us);
+                }
+            }
             close(sock_fd);
             return EXIT_FAILURE;
         }
 
         if (recv_seq != sent_seq) {
             fprintf(stderr, "unexpected sequence\n");
+            malformed_messages++;
+            {
+                int64_t duration_us;
+
+                if (get_connection_duration_us(&conn_start, &duration_us) == 0) {
+                    print_session_counters(messages_sent, messages_received,
+                                           malformed_messages, duration_us);
+                }
+            }
             close(sock_fd);
             return EXIT_FAILURE;
         }
+
+        messages_received++;
 
         struct timespec end_ts;
         if (clock_gettime(CLOCK_MONOTONIC, &end_ts) == -1) {
@@ -217,6 +298,15 @@ if (sock_fd == -1) {
         }
         if (n == 0) {
             fprintf(stderr, "incomplete response\n");
+            malformed_messages++;
+            {
+                int64_t duration_us;
+
+                if (get_connection_duration_us(&conn_start, &duration_us) == 0) {
+                    print_session_counters(messages_sent, messages_received,
+                                           malformed_messages, duration_us);
+                }
+            }
             close(sock_fd);
             return EXIT_FAILURE;
         }
@@ -226,6 +316,15 @@ if (sock_fd == -1) {
         }
         if (len >= sizeof(buffer) - 1) {
             fprintf(stderr, "response too long\n");
+            malformed_messages++;
+            {
+                int64_t duration_us;
+
+                if (get_connection_duration_us(&conn_start, &duration_us) == 0) {
+                    print_session_counters(messages_sent, messages_received,
+                                           malformed_messages, duration_us);
+                }
+            }
             close(sock_fd);
             return EXIT_FAILURE;
         }
@@ -234,15 +333,32 @@ if (sock_fd == -1) {
 
     if (strcmp(buffer, "BYE") != 0) {
         fprintf(stderr, "invalid response\n");
+        malformed_messages++;
+        {
+            int64_t duration_us;
+
+            if (get_connection_duration_us(&conn_start, &duration_us) == 0) {
+                print_session_counters(messages_sent, messages_received,
+                                       malformed_messages, duration_us);
+            }
+        }
         close(sock_fd);
         return EXIT_FAILURE;
     }
 
     int64_t avg_rtt_us = total_rtt_us / completed_exchanges;
+    int64_t duration_us;
+
+    if (get_connection_duration_us(&conn_start, &duration_us) == -1) {
+        close(sock_fd);
+        return EXIT_FAILURE;
+    }
     printf("exchanges: %" PRId64 "\n", completed_exchanges);
     printf("rtt_min_us: %" PRId64 "\n", min_rtt_us);
     printf("rtt_max_us: %" PRId64 "\n", max_rtt_us);
     printf("rtt_avg_us: %" PRId64 "\n", avg_rtt_us);
+    print_session_counters(messages_sent, messages_received,
+                           malformed_messages, duration_us);
 
     close(sock_fd);
 

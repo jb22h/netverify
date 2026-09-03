@@ -1,12 +1,27 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+
+static int64_t timespec_diff_us(const struct timespec *start, const struct timespec *end)
+{
+    int64_t sec = (int64_t)(end->tv_sec - start->tv_sec);
+    int64_t nsec = (int64_t)(end->tv_nsec - start->tv_nsec);
+    if (nsec < 0) {
+        sec--;
+        nsec += 1000000000L;
+    }
+    return sec * 1000000L + nsec / 1000;
+}
 
 static int send_all(int fd, const char *buffer, size_t length)
 {
@@ -29,6 +44,26 @@ static int send_all(int fd, const char *buffer, size_t length)
         remaining -= (size_t)sent;
     }
 
+    return 0;
+}
+
+static int print_session_summary(int64_t messages_sent,
+                                 int64_t messages_received,
+                                 int64_t malformed_messages,
+                                 const struct timespec *conn_start)
+{
+    struct timespec conn_end;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &conn_end) == -1) {
+        perror("clock_gettime");
+        return -1;
+    }
+
+    printf("messages_sent: %" PRId64 "\n", messages_sent);
+    printf("messages_received: %" PRId64 "\n", messages_received);
+    printf("malformed_messages: %" PRId64 "\n", malformed_messages);
+    printf("connection_duration_us: %" PRId64 "\n",
+           timespec_diff_us(conn_start, &conn_end));
     return 0;
 }
 
@@ -92,9 +127,20 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    struct timespec conn_start;
+    if (clock_gettime(CLOCK_MONOTONIC, &conn_start) == -1) {
+        perror("clock_gettime");
+        close(client_fd);
+        close(server_fd);
+        return EXIT_FAILURE;
+    }
+
     char buffer[64];
     long expected_seq = 1;
     int completed_exchanges = 0;
+    int64_t messages_sent = 0;
+    int64_t messages_received = 0;
+    int64_t malformed_messages = 0;
 
     for (;;) {
         size_t len = 0;
@@ -111,6 +157,9 @@ int main(int argc, char *argv[])
             if (n == 0) {
                 if (len > 0) {
                     fprintf(stderr, "incomplete request\n");
+                    malformed_messages++;
+                    print_session_summary(messages_sent, messages_received,
+                                          malformed_messages, &conn_start);
                     close(client_fd);
                     close(server_fd);
                     return EXIT_FAILURE;
@@ -129,6 +178,9 @@ int main(int argc, char *argv[])
             }
             if (len >= sizeof(buffer) - 1) {
                 fprintf(stderr, "message too long\n");
+                malformed_messages++;
+                print_session_summary(messages_sent, messages_received,
+                                      malformed_messages, &conn_start);
                 close(client_fd);
                 close(server_fd);
                 return EXIT_FAILURE;
@@ -148,6 +200,9 @@ int main(int argc, char *argv[])
         const char *prefix = "PING ";
         if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
             fprintf(stderr, "invalid request\n");
+            malformed_messages++;
+            print_session_summary(messages_sent, messages_received,
+                                  malformed_messages, &conn_start);
             close(client_fd);
             close(server_fd);
             return EXIT_FAILURE;
@@ -158,6 +213,9 @@ int main(int argc, char *argv[])
         long seq = strtol(seq_start, &end, 10);
         if (errno != 0 || end == seq_start || *end != '\0' || seq < 1) {
             fprintf(stderr, "invalid request\n");
+            malformed_messages++;
+            print_session_summary(messages_sent, messages_received,
+                                  malformed_messages, &conn_start);
             close(client_fd);
             close(server_fd);
             return EXIT_FAILURE;
@@ -165,11 +223,15 @@ int main(int argc, char *argv[])
 
         if (seq != expected_seq) {
             fprintf(stderr, "unexpected sequence\n");
+            malformed_messages++;
+            print_session_summary(messages_sent, messages_received,
+                                  malformed_messages, &conn_start);
             close(client_fd);
             close(server_fd);
             return EXIT_FAILURE;
         }
 
+        messages_received++;
         printf("%s\n", buffer);
 
         char response[64];
@@ -187,11 +249,18 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
+        messages_sent++;
         expected_seq++;
         completed_exchanges++;
     }
 
 session_done:
+    if (print_session_summary(messages_sent, messages_received,
+                              malformed_messages, &conn_start) == -1) {
+        close(client_fd);
+        close(server_fd);
+        return EXIT_FAILURE;
+    }
     close(client_fd);
     close(server_fd);
 
