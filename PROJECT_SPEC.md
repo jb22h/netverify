@@ -1030,7 +1030,7 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 2 — Protocol and Multiple Messages` (next)
+`Phase 3 — Multiple Clients and Concurrency` (next)
 
 Completed:
 
@@ -1053,11 +1053,26 @@ Completed:
 - Basic PING/PONG validation
 - Makefile build and clean targets
 
+**Phase 2 — Protocol and Multiple Messages**
+- Newline-delimited TCP message framing
+- PING <seq> / PONG <seq> protocol
+- Strict sequence validation
+- Multiple messages on one TCP connection
+- Configurable client --count
+- Explicit QUIT / BYE shutdown
+- Robust send_all() (partial writes and EINTR)
+- Client RTT measurement with CLOCK_MONOTONIC
+- RTT min/max/avg summary
+- Session metrics: messages_sent, messages_received,
+  malformed_messages, connection_duration_us
+- Successful 1000-message workload
+- Malformed / unexpected sequence detection verified
+
 Next:
-- Begin Phase 2 — Protocol and Multiple Messages
+- Begin Phase 3 — Multiple Clients and Concurrency
 
 Last updated:
-2026-09-02
+2026-09-03
 
 ---
 
