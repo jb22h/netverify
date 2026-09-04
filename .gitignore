@@ -1,3 +1,7 @@
 net_server
 net_client
 *.o
+
+# Python
+__pycache__/
+*.py[cod]
