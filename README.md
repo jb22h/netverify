@@ -9,13 +9,18 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 2** — Protocol and Multiple Messages: complete
 - **Phase 3** — Multiple Clients and Concurrency: complete
 - **Phase 4** — Structured Logging and Metrics: complete
+- **Phase 5** — Python Automation Layer: complete
 
-Phase 4 adds structured UTC lifecycle logs (`CONNECT` / `SESSION_END` / `DISCONNECT` and related events), mutex-safe concurrent logging, session IDs, byte and throughput metrics, and server process-lifetime counters. Concurrent load was verified at 10 and 100 clients with exact lifecycle counts and `active_connections` returning to 0.
+Phase 5 adds a stdlib Python runner under `automation/` that starts `net_server`, waits for LISTEN via `/proc/net/tcp` (without opening a TCP probe), runs `net_client`, parses Phase 4 structured logs, and asserts deterministic PASS/FAIL for `basic_ping_pong` and `connect_fail_no_server`, with `--json` output and no orphaned server processes.
 
 ## Directory Layout
 
 ```text
 netverify/
+├── automation/
+│   ├── runner.py
+│   ├── logparse.py
+│   └── assertions.py
 ├── networking/
 │   ├── client/
 │   │   └── client.c

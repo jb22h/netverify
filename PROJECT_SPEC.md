@@ -1030,7 +1030,7 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 5 — Python Automation Layer`
+`Phase 6 — Failure Injection`
 
 Completed:
 
@@ -1110,8 +1110,35 @@ Completed:
 - Deferred (behavior not implemented yet): timeout, reconnect,
   retry, and P95 latency metrics
 
+**Phase 5 — Python Automation Layer**
+- automation/runner.py, logparse.py, assertions.py (stdlib only)
+- Runner starts net_server via subprocess.Popen
+- Binaries resolved relative to project root
+- Free localhost port selection
+- Server readiness via /proc/net/tcp LISTEN polling
+  (no TCP probe; does not pollute server metrics)
+- Runs net_client; captures stdout/stderr
+- Always terminates and reaps server (terminate → wait → kill)
+- No orphaned net_server after automation runs
+- Quote-aware Phase 4 log parsing with shlex
+  (e.g. error_text="Connection refused")
+- Non-NetVerify lines skipped without crashing the parser
+- basic_ping_pong: client/server lifecycle, message counts,
+  malformed_messages == 0, bytes, process counters,
+  active_connections == 0; no C0↔C<n> correlation
+- connect_fail_no_server: no server started; CONNECT_ATTEMPT,
+  CONNECT_FAIL, no CONNECT_OK/SESSION_END; numeric error_code;
+  non-empty parsed error_text
+- CLI: --count, --test, --all, --json
+- Exit 0 pass / 1 verification fail / 2 setup error
+- TestResult with typed metrics; JSON numbers not strings
+- Verified: count 1/10/100, JSON, quoted parser, --count 0 → exit 2,
+  connect_fail_no_server, --all --count 50 (+ JSON)
+- Intentionally excluded: pytest, parallel tests, malformed socket
+  scenario, tc/netem, timeout/reconnect, Redis, Java, Docker, DB
+
 Next:
-- Begin Phase 5 — Python Automation Layer
+- Begin Phase 6 — Failure Injection
 
 Last updated:
 2026-09-05
