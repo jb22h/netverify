@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,13 +68,141 @@ static int print_session_summary(int64_t messages_sent,
     return 0;
 }
 
+static void *client_thread(void *arg)
+{
+    int client_fd = *(int *)arg;
+    free(arg);
+
+    struct timespec conn_start;
+    if (clock_gettime(CLOCK_MONOTONIC, &conn_start) == -1) {
+        perror("clock_gettime");
+        close(client_fd);
+        return NULL;
+    }
+
+    char buffer[64];
+    char *end;
+    long expected_seq = 1;
+    int completed_exchanges = 0;
+    int64_t messages_sent = 0;
+    int64_t messages_received = 0;
+    int64_t malformed_messages = 0;
+
+    for (;;) {
+        size_t len = 0;
+
+        for (;;) {
+            char c;
+            ssize_t n = recv(client_fd, &c, 1, 0);
+            if (n == -1) {
+                perror("recv");
+                close(client_fd);
+                return NULL;
+            }
+            if (n == 0) {
+                if (len > 0) {
+                    fprintf(stderr, "incomplete request\n");
+                    malformed_messages++;
+                    print_session_summary(messages_sent, messages_received,
+                                          malformed_messages, &conn_start);
+                    close(client_fd);
+                    return NULL;
+                }
+                if (completed_exchanges == 0) {
+                    fprintf(stderr, "client closed before sending a request\n");
+                    close(client_fd);
+                    return NULL;
+                }
+                goto session_done;
+            }
+            if (c == '\n') {
+                buffer[len] = '\0';
+                break;
+            }
+            if (len >= sizeof(buffer) - 1) {
+                fprintf(stderr, "message too long\n");
+                malformed_messages++;
+                print_session_summary(messages_sent, messages_received,
+                                      malformed_messages, &conn_start);
+                close(client_fd);
+                return NULL;
+            }
+            buffer[len++] = c;
+        }
+
+        if (strcmp(buffer, "QUIT") == 0) {
+            if (send_all(client_fd, "BYE\n", 4) == -1) {
+                close(client_fd);
+                return NULL;
+            }
+            goto session_done;
+        }
+
+        const char *prefix = "PING ";
+        if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
+            fprintf(stderr, "invalid request\n");
+            malformed_messages++;
+            print_session_summary(messages_sent, messages_received,
+                                  malformed_messages, &conn_start);
+            close(client_fd);
+            return NULL;
+        }
+
+        char *seq_start = buffer + strlen(prefix);
+        errno = 0;
+        long seq = strtol(seq_start, &end, 10);
+        if (errno != 0 || end == seq_start || *end != '\0' || seq < 1) {
+            fprintf(stderr, "invalid request\n");
+            malformed_messages++;
+            print_session_summary(messages_sent, messages_received,
+                                  malformed_messages, &conn_start);
+            close(client_fd);
+            return NULL;
+        }
+
+        if (seq != expected_seq) {
+            fprintf(stderr, "unexpected sequence\n");
+            malformed_messages++;
+            print_session_summary(messages_sent, messages_received,
+                                  malformed_messages, &conn_start);
+            close(client_fd);
+            return NULL;
+        }
+
+        messages_received++;
+        printf("%s\n", buffer);
+
+        char response[64];
+        int written = snprintf(response, sizeof(response), "PONG %ld\n", seq);
+        if (written < 0 || (size_t)written >= sizeof(response)) {
+            fprintf(stderr, "response formatting failed\n");
+            close(client_fd);
+            return NULL;
+        }
+
+        if (send_all(client_fd, response, (size_t)written) == -1) {
+            close(client_fd);
+            return NULL;
+        }
+
+        messages_sent++;
+        expected_seq++;
+        completed_exchanges++;
+    }
+
+session_done:
+    print_session_summary(messages_sent, messages_received,
+                          malformed_messages, &conn_start);
+    close(client_fd);
+    return NULL;
+}
+
 int main(int argc, char *argv[])
 {
     int server_fd;
-    int client_fd;
     struct sockaddr_in addr;
-    struct sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
+    pthread_attr_t attr;
+    int rc;
 
     if (argc != 3) {
         fprintf(stderr, "usage: ./net_server --port <port>\n");
@@ -120,149 +249,51 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-    if (client_fd == -1) {
-        perror("accept");
+    rc = pthread_attr_init(&attr);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_attr_init: %s\n", strerror(rc));
         close(server_fd);
         return EXIT_FAILURE;
     }
 
-    struct timespec conn_start;
-    if (clock_gettime(CLOCK_MONOTONIC, &conn_start) == -1) {
-        perror("clock_gettime");
-        close(client_fd);
+    rc = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_attr_setdetachstate: %s\n", strerror(rc));
+        pthread_attr_destroy(&attr);
         close(server_fd);
         return EXIT_FAILURE;
     }
-
-    char buffer[64];
-    long expected_seq = 1;
-    int completed_exchanges = 0;
-    int64_t messages_sent = 0;
-    int64_t messages_received = 0;
-    int64_t malformed_messages = 0;
 
     for (;;) {
-        size_t len = 0;
-
-        for (;;) {
-            char c;
-            ssize_t n = recv(client_fd, &c, 1, 0);
-            if (n == -1) {
-                perror("recv");
-                close(client_fd);
-                close(server_fd);
-                return EXIT_FAILURE;
+        struct sockaddr_in client_addr;
+        socklen_t client_addr_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr,
+                               &client_addr_len);
+        if (client_fd == -1) {
+            if (errno == EINTR) {
+                continue;
             }
-            if (n == 0) {
-                if (len > 0) {
-                    fprintf(stderr, "incomplete request\n");
-                    malformed_messages++;
-                    print_session_summary(messages_sent, messages_received,
-                                          malformed_messages, &conn_start);
-                    close(client_fd);
-                    close(server_fd);
-                    return EXIT_FAILURE;
-                }
-                if (completed_exchanges == 0) {
-                    fprintf(stderr, "client closed before sending a request\n");
-                    close(client_fd);
-                    close(server_fd);
-                    return EXIT_FAILURE;
-                }
-                goto session_done;
-            }
-            if (c == '\n') {
-                buffer[len] = '\0';
-                break;
-            }
-            if (len >= sizeof(buffer) - 1) {
-                fprintf(stderr, "message too long\n");
-                malformed_messages++;
-                print_session_summary(messages_sent, messages_received,
-                                      malformed_messages, &conn_start);
-                close(client_fd);
-                close(server_fd);
-                return EXIT_FAILURE;
-            }
-            buffer[len++] = c;
-        }
-
-        if (strcmp(buffer, "QUIT") == 0) {
-            if (send_all(client_fd, "BYE\n", 4) == -1) {
-                close(client_fd);
-                close(server_fd);
-                return EXIT_FAILURE;
-            }
-            goto session_done;
-        }
-
-        const char *prefix = "PING ";
-        if (strncmp(buffer, prefix, strlen(prefix)) != 0) {
-            fprintf(stderr, "invalid request\n");
-            malformed_messages++;
-            print_session_summary(messages_sent, messages_received,
-                                  malformed_messages, &conn_start);
-            close(client_fd);
+            perror("accept");
+            pthread_attr_destroy(&attr);
             close(server_fd);
             return EXIT_FAILURE;
         }
 
-        char *seq_start = buffer + strlen(prefix);
-        errno = 0;
-        long seq = strtol(seq_start, &end, 10);
-        if (errno != 0 || end == seq_start || *end != '\0' || seq < 1) {
-            fprintf(stderr, "invalid request\n");
-            malformed_messages++;
-            print_session_summary(messages_sent, messages_received,
-                                  malformed_messages, &conn_start);
+        int *arg = malloc(sizeof(*arg));
+        if (arg == NULL) {
+            fprintf(stderr, "malloc: out of memory\n");
             close(client_fd);
-            close(server_fd);
-            return EXIT_FAILURE;
+            continue;
         }
+        *arg = client_fd;
 
-        if (seq != expected_seq) {
-            fprintf(stderr, "unexpected sequence\n");
-            malformed_messages++;
-            print_session_summary(messages_sent, messages_received,
-                                  malformed_messages, &conn_start);
+        pthread_t thread;
+        rc = pthread_create(&thread, &attr, client_thread, arg);
+        if (rc != 0) {
+            fprintf(stderr, "pthread_create: %s\n", strerror(rc));
+            free(arg);
             close(client_fd);
-            close(server_fd);
-            return EXIT_FAILURE;
+            continue;
         }
-
-        messages_received++;
-        printf("%s\n", buffer);
-
-        char response[64];
-        int written = snprintf(response, sizeof(response), "PONG %ld\n", seq);
-        if (written < 0 || (size_t)written >= sizeof(response)) {
-            fprintf(stderr, "response formatting failed\n");
-            close(client_fd);
-            close(server_fd);
-            return EXIT_FAILURE;
-        }
-
-        if (send_all(client_fd, response, (size_t)written) == -1) {
-            close(client_fd);
-            close(server_fd);
-            return EXIT_FAILURE;
-        }
-
-        messages_sent++;
-        expected_seq++;
-        completed_exchanges++;
     }
-
-session_done:
-    if (print_session_summary(messages_sent, messages_received,
-                              malformed_messages, &conn_start) == -1) {
-        close(client_fd);
-        close(server_fd);
-        return EXIT_FAILURE;
-    }
-    close(client_fd);
-    close(server_fd);
-
-    return EXIT_SUCCESS;
 }
