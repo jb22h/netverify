@@ -283,3 +283,78 @@ def assert_basic_ping_pong(
                 )
 
     return failures, metrics
+
+
+def assert_connect_fail_no_server(
+    port: int,
+    client_exit_code: int | None,
+    client_events: list[LogEvent],
+) -> tuple[list[str], dict[str, Any]]:
+    """Assert connect_fail_no_server: client fails when nothing is listening.
+
+    Returns (failures, metrics). Does not print.
+    """
+    failures: list[str] = []
+    metrics: dict[str, Any] = {"port": port}
+
+    if client_exit_code is not None:
+        metrics["client_exit_code"] = client_exit_code
+
+    if client_exit_code is None or client_exit_code == 0:
+        failures.append(
+            f"client exit code: expected nonzero, got {client_exit_code!r}"
+        )
+
+    attempts = _events_named(client_events, "CONNECT_ATTEMPT")
+    fails = _events_named(client_events, "CONNECT_FAIL")
+    oks = _events_named(client_events, "CONNECT_OK")
+    ends = _events_named(client_events, "SESSION_END")
+
+    if len(attempts) != 1:
+        failures.append(
+            f"client CONNECT_ATTEMPT: expected exactly 1, got {len(attempts)}"
+        )
+    if len(fails) != 1:
+        failures.append(
+            f"client CONNECT_FAIL: expected exactly 1, got {len(fails)}"
+        )
+    if len(oks) != 0:
+        failures.append(
+            "client CONNECT_OK: expected 0 "
+            f"(port may have been claimed by another process), got {len(oks)}"
+        )
+    if len(ends) != 0:
+        failures.append(
+            f"client SESSION_END: expected 0, got {len(ends)}"
+        )
+
+    if len(fails) == 1:
+        fail = fails[0]
+        prefix = "client CONNECT_FAIL"
+        host = fail.fields.get("host")
+        if host != "127.0.0.1":
+            failures.append(
+                f"{prefix} host: expected 127.0.0.1, got {host!r}"
+            )
+
+        fail_port = _require_int(fail.fields, "port", failures, prefix)
+        if fail_port is not None and fail_port != port:
+            failures.append(
+                f"{prefix} port: expected {port}, got {fail_port}"
+            )
+
+        error_code = _require_int(fail.fields, "error_code", failures, prefix)
+        if error_code is not None:
+            metrics["error_code"] = error_code
+            if error_code == 0:
+                failures.append(f"{prefix} error_code: expected nonzero, got 0")
+
+        if "error_text" not in fail.fields:
+            failures.append(f"{prefix}: missing field error_text")
+        else:
+            error_text = fail.fields["error_text"]
+            metrics["error_text"] = error_text
+            if error_text == "":
+                failures.append(f"{prefix} error_text: expected non-empty string")
+
+    return failures, metrics

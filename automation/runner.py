@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NetVerify Phase 5 automation runner — Milestone 1 (basic_ping_pong)."""
+"""NetVerify Phase 5 automation runner."""
 
 from __future__ import annotations
 
@@ -13,8 +13,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from assertions import assert_basic_ping_pong
+from assertions import assert_basic_ping_pong, assert_connect_fail_no_server
 from logparse import parse_log_text
+
+VALID_TESTS = ("basic_ping_pong", "connect_fail_no_server")
 
 
 @dataclass
@@ -41,6 +43,16 @@ def resolve_binaries(root: Path) -> tuple[Path, Path] | str:
             f"(expected under {root}; run `make` first)"
         )
     return server, client
+
+
+def resolve_client_binary(root: Path) -> Path | str:
+    client = root / "net_client"
+    if not client.is_file():
+        return (
+            f"missing binary: net_client "
+            f"(expected under {root}; run `make` first)"
+        )
+    return client
 
 
 def pick_free_port() -> int:
@@ -125,7 +137,6 @@ def stop_server(server_proc: subprocess.Popen[str]) -> tuple[str, str]:
         stdout = out or ""
         stderr = err or ""
     except (subprocess.TimeoutExpired, ValueError, OSError):
-        # Pipes may already be partially consumed; best-effort drain.
         if server_proc.stdout is not None:
             try:
                 stdout = server_proc.stdout.read() or ""
@@ -147,13 +158,35 @@ def print_human(result: TestResult) -> None:
         print(f"messages: {result.metrics['requested_count']}")
     if "client_rtt_avg_us" in result.metrics:
         print(f"client_rtt_avg_us: {result.metrics['client_rtt_avg_us']}")
+    if "error_text" in result.metrics:
+        print(f"error_text: {result.metrics['error_text']}")
+    if "port" in result.metrics and result.name == "connect_fail_no_server":
+        print(f"port: {result.metrics['port']}")
     print(f"duration_s: {result.duration_s:.3f}")
     for failure in result.failures:
         print(f"- {failure}")
 
 
-def print_json(result: TestResult) -> None:
+def print_human_many(results: list[TestResult]) -> None:
+    for i, result in enumerate(results):
+        if i > 0:
+            print()
+        print_human(result)
+    print()
+    overall = "PASS" if all(r.passed for r in results) else "FAIL"
+    print(f"overall: {overall}")
+
+
+def print_json_single(result: TestResult) -> None:
     print(json.dumps(asdict(result), indent=2, sort_keys=True))
+
+
+def print_json_many(results: list[TestResult]) -> None:
+    payload = {
+        "passed": all(r.passed for r in results),
+        "results": [asdict(r) for r in results],
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def run_basic_ping_pong(root: Path, count: int) -> TestResult:
@@ -262,20 +295,122 @@ def run_basic_ping_pong(root: Path, count: int) -> TestResult:
     )
 
 
+def run_connect_fail_no_server(root: Path) -> TestResult:
+    name = "connect_fail_no_server"
+    started = time.monotonic()
+
+    client_bin = resolve_client_binary(root)
+    if isinstance(client_bin, str):
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=[client_bin],
+            client_exit_code=None,
+            duration_s=time.monotonic() - started,
+            metrics={"setup_error": True},
+        )
+
+    port = pick_free_port()
+    client_exit: int | None = None
+    client_stderr = ""
+
+    try:
+        completed = subprocess.run(
+            [
+                str(client_bin),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--count",
+                "1",
+            ],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+        client_exit = completed.returncode
+        client_stderr = completed.stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        if exc.stderr:
+            client_stderr = (
+                exc.stderr.decode() if isinstance(exc.stderr, bytes) else exc.stderr
+            )
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=["client timed out after 30.0s"],
+            client_exit_code=None,
+            duration_s=time.monotonic() - started,
+            metrics={"port": port},
+        )
+    except OSError as exc:
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=[f"failed to start client: {exc}"],
+            client_exit_code=None,
+            duration_s=time.monotonic() - started,
+            metrics={"port": port, "setup_error": True},
+        )
+
+    client_events = parse_log_text(client_stderr)
+    failures, metrics = assert_connect_fail_no_server(
+        port, client_exit, client_events
+    )
+    metrics["port"] = port
+
+    return TestResult(
+        name=name,
+        passed=len(failures) == 0,
+        failures=failures,
+        client_exit_code=client_exit,
+        duration_s=time.monotonic() - started,
+        metrics=metrics,
+    )
+
+
+def run_named_test(root: Path, name: str, count: int) -> TestResult:
+    if name == "basic_ping_pong":
+        return run_basic_ping_pong(root, count)
+    if name == "connect_fail_no_server":
+        return run_connect_fail_no_server(root)
+    return TestResult(
+        name=name,
+        passed=False,
+        failures=[f"unknown test: {name}"],
+        client_exit_code=None,
+        duration_s=0.0,
+        metrics={"setup_error": True},
+    )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="NetVerify Phase 5 automation runner (basic_ping_pong)"
+        description="NetVerify Phase 5 automation runner"
     )
     parser.add_argument(
         "--count",
         type=int,
         default=100,
-        help="number of PING/PONG exchanges (default: 100)",
+        help="PING/PONG count for basic_ping_pong (default: 100)",
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="print a single JSON TestResult object on stdout",
+        help="print JSON result(s) on stdout",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--test",
+        choices=VALID_TESTS,
+        help="run a single named test",
+    )
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="run basic_ping_pong then connect_fail_no_server",
     )
     return parser.parse_args(argv)
 
@@ -287,31 +422,55 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     root = project_root()
-    binaries = resolve_binaries(root)
-    if isinstance(binaries, str):
-        print(f"error: {binaries}", file=sys.stderr)
-        return 2
 
-    try:
-        result = run_basic_ping_pong(root, args.count)
-    except Exception as exc:  # noqa: BLE001 — convert unexpected errors to FAIL
-        result = TestResult(
-            name="basic_ping_pong",
-            passed=False,
-            failures=[f"unexpected runner error: {exc}"],
-            client_exit_code=None,
-            duration_s=0.0,
-            metrics={},
-        )
+    if args.all:
+        selected = list(VALID_TESTS)
+    elif args.test is not None:
+        selected = [args.test]
+    else:
+        selected = ["basic_ping_pong"]
+
+    # Fatal setup: missing binaries required by the selected set.
+    if "basic_ping_pong" in selected:
+        binaries = resolve_binaries(root)
+        if isinstance(binaries, str):
+            print(f"error: {binaries}", file=sys.stderr)
+            return 2
+    else:
+        client = resolve_client_binary(root)
+        if isinstance(client, str):
+            print(f"error: {client}", file=sys.stderr)
+            return 2
+
+    results: list[TestResult] = []
+    for name in selected:
+        try:
+            result = run_named_test(root, name, args.count)
+        except Exception as exc:  # noqa: BLE001
+            result = TestResult(
+                name=name,
+                passed=False,
+                failures=[f"unexpected runner error: {exc}"],
+                client_exit_code=None,
+                duration_s=0.0,
+                metrics={},
+            )
+        results.append(result)
 
     if args.json:
-        print_json(result)
+        if len(results) == 1 and not args.all:
+            print_json_single(results[0])
+        else:
+            print_json_many(results)
     else:
-        print_human(result)
+        if len(results) == 1 and not args.all:
+            print_human(results[0])
+        else:
+            print_human_many(results)
 
-    if result.metrics.get("setup_error"):
-        return 2 if not result.passed else 0
-    return 0 if result.passed else 1
+    if any(r.metrics.get("setup_error") for r in results):
+        return 2
+    return 0 if all(r.passed for r in results) else 1
 
 
 if __name__ == "__main__":
