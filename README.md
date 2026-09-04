@@ -7,8 +7,9 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 0** — Environment and Repository: complete
 - **Phase 1** — Minimal TCP Client and Server in C: complete
 - **Phase 2** — Protocol and Multiple Messages: complete
+- **Phase 3** — Multiple Clients and Concurrency: complete
 
-Phase 2 delivers a newline-delimited TCP protocol (`PING <seq>` / `PONG <seq>`) with strict sequence validation, multiple messages on one connection, configurable `--count`, explicit `QUIT` / `BYE` shutdown, robust `send_all()`, client RTT min/max/avg, and session metrics (`messages_sent`, `messages_received`, `malformed_messages`, `connection_duration_us`).
+Phase 3 adds a continuous accept loop with a detached pthread worker per client, mutex-protected `active_connections` tracking, and centralized worker cleanup. Concurrent clients were verified at 3, 10 (peak `active_connections` = 10), and 100 with zero client failures; the server stays up and accepts new clients after load.
 
 ## Directory Layout
 

@@ -1030,7 +1030,7 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 3 — Multiple Clients and Concurrency` (next)
+`Phase 4 — Structured Logging and Metrics`
 
 Completed:
 
@@ -1068,11 +1068,25 @@ Completed:
 - Successful 1000-message workload
 - Malformed / unexpected sequence detection verified
 
+**Phase 3 — Multiple Clients and Concurrency**
+- Server accept loop for continuous client handling
+- Detached pthread worker per client
+- Safe client_fd ownership transfer to each worker
+- Per-client protocol/session state remains isolated
+- Multiple clients operate concurrently
+- active_connections shared counter
+- pthread mutex protects active_connections
+- Centralized worker cleanup prevents missed/double decrement
+- Verified 3 concurrent clients
+- Verified 10 concurrent clients with peak active_connections = 10
+- Verified 100 clients with zero client failures
+- Server remains alive and accepts new clients after load
+
 Next:
-- Begin Phase 3 — Multiple Clients and Concurrency
+- Begin Phase 4 — Structured Logging and Metrics
 
 Last updated:
-2026-09-03
+2026-09-04
 
 ---
 
