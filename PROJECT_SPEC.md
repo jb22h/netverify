@@ -1030,7 +1030,7 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 4 — Structured Logging and Metrics`
+`Phase 5 — Python Automation Layer`
 
 Completed:
 
@@ -1082,11 +1082,39 @@ Completed:
 - Verified 100 clients with zero client failures
 - Server remains alive and accepts new clients after load
 
+**Phase 4 — Structured Logging and Metrics**
+- Structured UTC ISO8601 logs with millisecond precision
+- Component field: CLIENT / SERVER
+- Server-local session IDs C1, C2, ...; client-local C0
+- Structured key=value events: CONNECT_ATTEMPT, CONNECT_OK,
+  CONNECT_FAIL, CONNECT, ERROR, SESSION_END, DISCONNECT, SPAWN_FAIL
+- Server log_mutex prevents concurrent log-line corruption
+- server_state_mutex protects shared server state
+- Centralized worker cleanup; exactly one SESSION_END and
+  DISCONNECT per started worker
+- Session metrics: messages_sent, messages_received,
+  malformed_messages, connection_duration_us
+- Client RTT min/max/avg
+- bytes_sent, bytes_received
+- throughput_msg_per_s, throughput_bytes_per_s
+- active_connections tracking preserved
+- Process-lifetime counters: total_connections_accepted,
+  total_spawn_failures, total_sessions_ok, total_sessions_failed
+- send_all() partial-send accounting, EINTR retry, MSG_NOSIGNAL
+- Verified exact byte accounting (count=1)
+- Verified malformed sequence byte and process-counter behavior
+- Verified 10 concurrent clients with exact lifecycle counts
+- Verified 100 clients × 1000 messages: zero failures,
+  totals accepted/ok=100, spawn_failures/failed=0,
+  active_connections returned to 0
+- Deferred (behavior not implemented yet): timeout, reconnect,
+  retry, and P95 latency metrics
+
 Next:
-- Begin Phase 4 — Structured Logging and Metrics
+- Begin Phase 5 — Python Automation Layer
 
 Last updated:
-2026-09-04
+2026-09-05
 
 ---
 

@@ -8,8 +8,9 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 1** — Minimal TCP Client and Server in C: complete
 - **Phase 2** — Protocol and Multiple Messages: complete
 - **Phase 3** — Multiple Clients and Concurrency: complete
+- **Phase 4** — Structured Logging and Metrics: complete
 
-Phase 3 adds a continuous accept loop with a detached pthread worker per client, mutex-protected `active_connections` tracking, and centralized worker cleanup. Concurrent clients were verified at 3, 10 (peak `active_connections` = 10), and 100 with zero client failures; the server stays up and accepts new clients after load.
+Phase 4 adds structured UTC lifecycle logs (`CONNECT` / `SESSION_END` / `DISCONNECT` and related events), mutex-safe concurrent logging, session IDs, byte and throughput metrics, and server process-lifetime counters. Concurrent load was verified at 10 and 100 clients with exact lifecycle counts and `active_connections` returning to 0.
 
 ## Directory Layout
 
