@@ -13,6 +13,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+static int active_connections = 0;
+static pthread_mutex_t active_connections_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static int64_t timespec_diff_us(const struct timespec *start, const struct timespec *end)
 {
     int64_t sec = (int64_t)(end->tv_sec - start->tv_sec);
@@ -73,11 +76,26 @@ static void *client_thread(void *arg)
     int client_fd = *(int *)arg;
     free(arg);
 
+    int rc;
+    int n;
+
+    rc = pthread_mutex_lock(&active_connections_mutex);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_mutex_lock: %s\n", strerror(rc));
+        close(client_fd);
+        return NULL;
+    }
+    n = ++active_connections;
+    rc = pthread_mutex_unlock(&active_connections_mutex);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_mutex_unlock: %s\n", strerror(rc));
+    }
+    printf("active_connections: %d\n", n);
+
     struct timespec conn_start;
     if (clock_gettime(CLOCK_MONOTONIC, &conn_start) == -1) {
         perror("clock_gettime");
-        close(client_fd);
-        return NULL;
+        goto worker_exit;
     }
 
     char buffer[64];
@@ -93,25 +111,22 @@ static void *client_thread(void *arg)
 
         for (;;) {
             char c;
-            ssize_t n = recv(client_fd, &c, 1, 0);
-            if (n == -1) {
+            ssize_t nr = recv(client_fd, &c, 1, 0);
+            if (nr == -1) {
                 perror("recv");
-                close(client_fd);
-                return NULL;
+                goto worker_exit;
             }
-            if (n == 0) {
+            if (nr == 0) {
                 if (len > 0) {
                     fprintf(stderr, "incomplete request\n");
                     malformed_messages++;
                     print_session_summary(messages_sent, messages_received,
                                           malformed_messages, &conn_start);
-                    close(client_fd);
-                    return NULL;
+                    goto worker_exit;
                 }
                 if (completed_exchanges == 0) {
                     fprintf(stderr, "client closed before sending a request\n");
-                    close(client_fd);
-                    return NULL;
+                    goto worker_exit;
                 }
                 goto session_done;
             }
@@ -124,16 +139,14 @@ static void *client_thread(void *arg)
                 malformed_messages++;
                 print_session_summary(messages_sent, messages_received,
                                       malformed_messages, &conn_start);
-                close(client_fd);
-                return NULL;
+                goto worker_exit;
             }
             buffer[len++] = c;
         }
 
         if (strcmp(buffer, "QUIT") == 0) {
             if (send_all(client_fd, "BYE\n", 4) == -1) {
-                close(client_fd);
-                return NULL;
+                goto worker_exit;
             }
             goto session_done;
         }
@@ -144,8 +157,7 @@ static void *client_thread(void *arg)
             malformed_messages++;
             print_session_summary(messages_sent, messages_received,
                                   malformed_messages, &conn_start);
-            close(client_fd);
-            return NULL;
+            goto worker_exit;
         }
 
         char *seq_start = buffer + strlen(prefix);
@@ -156,8 +168,7 @@ static void *client_thread(void *arg)
             malformed_messages++;
             print_session_summary(messages_sent, messages_received,
                                   malformed_messages, &conn_start);
-            close(client_fd);
-            return NULL;
+            goto worker_exit;
         }
 
         if (seq != expected_seq) {
@@ -165,8 +176,7 @@ static void *client_thread(void *arg)
             malformed_messages++;
             print_session_summary(messages_sent, messages_received,
                                   malformed_messages, &conn_start);
-            close(client_fd);
-            return NULL;
+            goto worker_exit;
         }
 
         messages_received++;
@@ -176,13 +186,11 @@ static void *client_thread(void *arg)
         int written = snprintf(response, sizeof(response), "PONG %ld\n", seq);
         if (written < 0 || (size_t)written >= sizeof(response)) {
             fprintf(stderr, "response formatting failed\n");
-            close(client_fd);
-            return NULL;
+            goto worker_exit;
         }
 
         if (send_all(client_fd, response, (size_t)written) == -1) {
-            close(client_fd);
-            return NULL;
+            goto worker_exit;
         }
 
         messages_sent++;
@@ -193,6 +201,19 @@ static void *client_thread(void *arg)
 session_done:
     print_session_summary(messages_sent, messages_received,
                           malformed_messages, &conn_start);
+
+worker_exit:
+    rc = pthread_mutex_lock(&active_connections_mutex);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_mutex_lock: %s\n", strerror(rc));
+    } else {
+        n = --active_connections;
+        rc = pthread_mutex_unlock(&active_connections_mutex);
+        if (rc != 0) {
+            fprintf(stderr, "pthread_mutex_unlock: %s\n", strerror(rc));
+        }
+        printf("active_connections: %d\n", n);
+    }
     close(client_fd);
     return NULL;
 }
