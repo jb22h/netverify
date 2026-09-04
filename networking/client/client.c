@@ -54,8 +54,8 @@ static int format_utc_timestamp(char *buf, size_t buflen)
 static void log_event(const char *event, const char *kv_fmt, ...)
 {
     char ts[32];
-    char kv[512];
-    char line[768];
+    char kv[768];
+    char line[1024];
 
     if (format_utc_timestamp(ts, sizeof(ts)) != 0) {
         snprintf(ts, sizeof(ts), "0000-00-00T00:00:00.000Z");
@@ -82,12 +82,12 @@ static void log_event(const char *event, const char *kv_fmt, ...)
     fputs(line, stderr);
 }
 
-static int send_all(int fd, const char *buffer, size_t length)
+static int send_all(int fd, const char *buffer, size_t length, int64_t *bytes_sent)
 {
     size_t remaining = length;
 
     while (remaining > 0) {
-        ssize_t sent = send(fd, buffer, remaining, 0);
+        ssize_t sent = send(fd, buffer, remaining, MSG_NOSIGNAL);
         if (sent == -1) {
             if (errno == EINTR) {
                 continue;
@@ -97,6 +97,9 @@ static int send_all(int fd, const char *buffer, size_t length)
         if (sent == 0) {
             errno = ECONNRESET;
             return -1;
+        }
+        if (bytes_sent != NULL) {
+            *bytes_sent += (int64_t)sent;
         }
         buffer += sent;
         remaining -= (size_t)sent;
@@ -121,6 +124,8 @@ static void emit_session_end(const char *reason,
                              int64_t messages_sent,
                              int64_t messages_received,
                              int64_t malformed_messages,
+                             int64_t bytes_sent,
+                             int64_t bytes_received,
                              int64_t completed_exchanges,
                              int64_t min_rtt_us,
                              int64_t max_rtt_us,
@@ -130,13 +135,43 @@ static void emit_session_end(const char *reason,
 {
     int64_t duration_us = 0;
     int have_duration = 0;
+    char extras[384];
+
+    extras[0] = '\0';
 
     if (have_conn_start &&
         get_connection_duration_us(conn_start, &duration_us) == 0) {
         have_duration = 1;
     }
 
-    if (completed_exchanges > 0 && have_duration) {
+    if (have_duration && duration_us > 0) {
+        double msg_per_s =
+            (double)completed_exchanges * 1000000.0 / (double)duration_us;
+        double bytes_per_s =
+            (double)(bytes_sent + bytes_received) * 1000000.0 /
+            (double)duration_us;
+        snprintf(extras, sizeof(extras),
+                 " bytes_sent=%" PRId64
+                 " bytes_received=%" PRId64
+                 " connection_duration_us=%" PRId64
+                 " throughput_msg_per_s=%.2f"
+                 " throughput_bytes_per_s=%.2f",
+                 bytes_sent, bytes_received, duration_us,
+                 msg_per_s, bytes_per_s);
+    } else if (have_duration) {
+        snprintf(extras, sizeof(extras),
+                 " bytes_sent=%" PRId64
+                 " bytes_received=%" PRId64
+                 " connection_duration_us=%" PRId64,
+                 bytes_sent, bytes_received, duration_us);
+    } else {
+        snprintf(extras, sizeof(extras),
+                 " bytes_sent=%" PRId64
+                 " bytes_received=%" PRId64,
+                 bytes_sent, bytes_received);
+    }
+
+    if (completed_exchanges > 0) {
         log_event("SESSION_END",
                   "reason=%s messages_sent=%" PRId64
                   " messages_received=%" PRId64
@@ -144,34 +179,18 @@ static void emit_session_end(const char *reason,
                   " rtt_min_us=%" PRId64
                   " rtt_max_us=%" PRId64
                   " rtt_avg_us=%" PRId64
-                  " connection_duration_us=%" PRId64,
+                  "%s",
                   reason, messages_sent, messages_received, malformed_messages,
                   min_rtt_us, max_rtt_us, total_rtt_us / completed_exchanges,
-                  duration_us);
-    } else if (completed_exchanges > 0) {
-        log_event("SESSION_END",
-                  "reason=%s messages_sent=%" PRId64
-                  " messages_received=%" PRId64
-                  " malformed_messages=%" PRId64
-                  " rtt_min_us=%" PRId64
-                  " rtt_max_us=%" PRId64
-                  " rtt_avg_us=%" PRId64,
-                  reason, messages_sent, messages_received, malformed_messages,
-                  min_rtt_us, max_rtt_us, total_rtt_us / completed_exchanges);
-    } else if (have_duration) {
-        log_event("SESSION_END",
-                  "reason=%s messages_sent=%" PRId64
-                  " messages_received=%" PRId64
-                  " malformed_messages=%" PRId64
-                  " connection_duration_us=%" PRId64,
-                  reason, messages_sent, messages_received, malformed_messages,
-                  duration_us);
+                  extras);
     } else {
         log_event("SESSION_END",
                   "reason=%s messages_sent=%" PRId64
                   " messages_received=%" PRId64
-                  " malformed_messages=%" PRId64,
-                  reason, messages_sent, messages_received, malformed_messages);
+                  " malformed_messages=%" PRId64
+                  "%s",
+                  reason, messages_sent, messages_received, malformed_messages,
+                  extras);
     }
 }
 
@@ -193,6 +212,8 @@ int main(int argc, char *argv[])
     int64_t messages_sent = 0;
     int64_t messages_received = 0;
     int64_t malformed_messages = 0;
+    int64_t bytes_sent = 0;
+    int64_t bytes_received = 0;
 
     if (argc != 7) {
         fprintf(stderr, "usage: ./net_client --host <host> --port <port> --count <count>\n");
@@ -285,7 +306,7 @@ int main(int argc, char *argv[])
             goto cleanup;
         }
 
-        if (send_all(sock_fd, request, (size_t)req_written) == -1) {
+        if (send_all(sock_fd, request, (size_t)req_written, &bytes_sent) == -1) {
             int saved_errno = errno;
             reason = "send_error";
             log_event("ERROR",
@@ -315,6 +336,9 @@ int main(int argc, char *argv[])
                           "op=protocol error_text=\"incomplete response\"");
                 goto cleanup;
             }
+
+            bytes_received += (int64_t)n;
+
             if (c == '\n') {
                 buffer[len] = '\0';
                 break;
@@ -387,7 +411,7 @@ int main(int argc, char *argv[])
         total_rtt_us += rtt_us;
     }
 
-    if (send_all(sock_fd, "QUIT\n", 5) == -1) {
+    if (send_all(sock_fd, "QUIT\n", 5, &bytes_sent) == -1) {
         int saved_errno = errno;
         reason = "send_error";
         log_event("ERROR",
@@ -417,6 +441,9 @@ int main(int argc, char *argv[])
                           "op=protocol error_text=\"incomplete response\"");
                 goto cleanup;
             }
+
+            bytes_received += (int64_t)n;
+
             if (c == '\n') {
                 buffer[len] = '\0';
                 break;
@@ -446,9 +473,9 @@ int main(int argc, char *argv[])
 cleanup:
     if (connected && !session_end_emitted) {
         emit_session_end(reason, messages_sent, messages_received,
-                         malformed_messages, completed_exchanges,
-                         min_rtt_us, max_rtt_us, total_rtt_us,
-                         &conn_start, have_conn_start);
+                         malformed_messages, bytes_sent, bytes_received,
+                         completed_exchanges, min_rtt_us, max_rtt_us,
+                         total_rtt_us, &conn_start, have_conn_start);
         session_end_emitted = 1;
     }
 

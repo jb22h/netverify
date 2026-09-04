@@ -16,6 +16,10 @@
 
 static int active_connections = 0;
 static uint64_t next_client_id = 1;
+static uint64_t connections_accepted = 0;
+static uint64_t spawn_failures = 0;
+static uint64_t sessions_ok = 0;
+static uint64_t sessions_failed = 0;
 static pthread_mutex_t server_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -66,8 +70,8 @@ static int format_utc_timestamp(char *buf, size_t buflen)
 static void log_event(uint64_t client_id, const char *event, const char *kv_fmt, ...)
 {
     char ts[32];
-    char kv[512];
-    char line[768];
+    char kv[768];
+    char line[1024];
     int rc;
 
     if (format_utc_timestamp(ts, sizeof(ts)) != 0) {
@@ -105,12 +109,12 @@ static void log_event(uint64_t client_id, const char *event, const char *kv_fmt,
     }
 }
 
-static int send_all(int fd, const char *buffer, size_t length)
+static int send_all(int fd, const char *buffer, size_t length, int64_t *bytes_sent)
 {
     size_t remaining = length;
 
     while (remaining > 0) {
-        ssize_t sent = send(fd, buffer, remaining, 0);
+        ssize_t sent = send(fd, buffer, remaining, MSG_NOSIGNAL);
         if (sent == -1) {
             if (errno == EINTR) {
                 continue;
@@ -120,6 +124,9 @@ static int send_all(int fd, const char *buffer, size_t length)
         if (sent == 0) {
             errno = ECONNRESET;
             return -1;
+        }
+        if (bytes_sent != NULL) {
+            *bytes_sent += (int64_t)sent;
         }
         buffer += sent;
         remaining -= (size_t)sent;
@@ -133,30 +140,77 @@ static void emit_session_end(uint64_t client_id,
                              int64_t messages_sent,
                              int64_t messages_received,
                              int64_t malformed_messages,
+                             int64_t bytes_sent,
+                             int64_t bytes_received,
+                             int completed_exchanges,
                              const struct timespec *conn_start,
-                             int have_conn_start)
+                             int have_conn_start,
+                             int have_totals,
+                             uint64_t total_connections_accepted,
+                             uint64_t total_spawn_failures,
+                             uint64_t total_sessions_ok,
+                             uint64_t total_sessions_failed)
 {
+    char extras[384];
+    int64_t duration_us = 0;
+    int have_duration = 0;
+
+    extras[0] = '\0';
+
     if (have_conn_start) {
         struct timespec conn_end;
         if (clock_gettime(CLOCK_MONOTONIC, &conn_end) == 0) {
-            log_event(client_id, "SESSION_END",
-                      "reason=%s messages_sent=%" PRId64
-                      " messages_received=%" PRId64
-                      " malformed_messages=%" PRId64
-                      " connection_duration_us=%" PRId64,
-                      reason, messages_sent, messages_received,
-                      malformed_messages,
-                      timespec_diff_us(conn_start, &conn_end));
-            return;
+            duration_us = timespec_diff_us(conn_start, &conn_end);
+            have_duration = 1;
         }
+    }
+
+    if (have_duration && duration_us > 0) {
+        double msg_per_s =
+            (double)completed_exchanges * 1000000.0 / (double)duration_us;
+        double bytes_per_s =
+            (double)(bytes_sent + bytes_received) * 1000000.0 /
+            (double)duration_us;
+        snprintf(extras, sizeof(extras),
+                 " bytes_sent=%" PRId64
+                 " bytes_received=%" PRId64
+                 " connection_duration_us=%" PRId64
+                 " throughput_msg_per_s=%.2f"
+                 " throughput_bytes_per_s=%.2f",
+                 bytes_sent, bytes_received, duration_us,
+                 msg_per_s, bytes_per_s);
+    } else if (have_duration) {
+        snprintf(extras, sizeof(extras),
+                 " bytes_sent=%" PRId64
+                 " bytes_received=%" PRId64
+                 " connection_duration_us=%" PRId64,
+                 bytes_sent, bytes_received, duration_us);
+    } else {
+        snprintf(extras, sizeof(extras),
+                 " bytes_sent=%" PRId64
+                 " bytes_received=%" PRId64,
+                 bytes_sent, bytes_received);
+    }
+
+    if (have_totals) {
+        char totals[256];
+        snprintf(totals, sizeof(totals),
+                 " total_connections_accepted=%" PRIu64
+                 " total_spawn_failures=%" PRIu64
+                 " total_sessions_ok=%" PRIu64
+                 " total_sessions_failed=%" PRIu64,
+                 total_connections_accepted, total_spawn_failures,
+                 total_sessions_ok, total_sessions_failed);
+        strncat(extras, totals, sizeof(extras) - strlen(extras) - 1);
     }
 
     log_event(client_id, "SESSION_END",
               "reason=%s messages_sent=%" PRId64
               " messages_received=%" PRId64
-              " malformed_messages=%" PRId64,
-              reason, messages_sent, messages_received,
-              malformed_messages);
+              " malformed_messages=%" PRId64
+              "%s",
+              reason, messages_sent, messages_received, malformed_messages,
+              extras);
 }
 
 static void *client_thread(void *arg)
@@ -182,6 +236,13 @@ static void *client_thread(void *arg)
     int64_t messages_sent = 0;
     int64_t messages_received = 0;
     int64_t malformed_messages = 0;
+    int64_t bytes_sent = 0;
+    int64_t bytes_received = 0;
+    int have_totals = 0;
+    uint64_t total_connections_accepted = 0;
+    uint64_t total_spawn_failures = 0;
+    uint64_t total_sessions_ok = 0;
+    uint64_t total_sessions_failed = 0;
 
     rc = pthread_mutex_lock(&server_state_mutex);
     if (rc != 0) {
@@ -242,6 +303,9 @@ static void *client_thread(void *arg)
                 }
                 goto worker_exit;
             }
+
+            bytes_received += (int64_t)nr;
+
             if (c == '\n') {
                 buffer[len] = '\0';
                 break;
@@ -257,7 +321,7 @@ static void *client_thread(void *arg)
         }
 
         if (strcmp(buffer, "QUIT") == 0) {
-            if (send_all(client_fd, "BYE\n", 4) == -1) {
+            if (send_all(client_fd, "BYE\n", 4, &bytes_sent) == -1) {
                 int saved_errno = errno;
                 reason = "send_error";
                 log_event(client_id, "ERROR",
@@ -315,7 +379,7 @@ static void *client_thread(void *arg)
             goto worker_exit;
         }
 
-        if (send_all(client_fd, response, (size_t)written) == -1) {
+        if (send_all(client_fd, response, (size_t)written, &bytes_sent) == -1) {
             int saved_errno = errno;
             reason = "send_error";
             log_event(client_id, "ERROR",
@@ -330,28 +394,45 @@ static void *client_thread(void *arg)
     }
 
 worker_exit:
-    emit_session_end(client_id, reason, messages_sent, messages_received,
-                     malformed_messages, &conn_start, have_conn_start);
+    rc = pthread_mutex_lock(&server_state_mutex);
+    if (rc != 0) {
+        log_event(client_id, "ERROR",
+                  "op=pthread_mutex_lock error_code=%d error_text=\"%s\"",
+                  rc, strerror(rc));
+        disconnect_active_unknown = 1;
+    } else {
+        if (counted_active) {
+            active_n = --active_connections;
+        } else {
+            disconnect_active_unknown = 1;
+        }
 
-    if (counted_active) {
-        rc = pthread_mutex_lock(&server_state_mutex);
+        if (strcmp(reason, "quit") == 0) {
+            sessions_ok++;
+        } else {
+            sessions_failed++;
+        }
+
+        total_connections_accepted = connections_accepted;
+        total_spawn_failures = spawn_failures;
+        total_sessions_ok = sessions_ok;
+        total_sessions_failed = sessions_failed;
+        have_totals = 1;
+
+        rc = pthread_mutex_unlock(&server_state_mutex);
         if (rc != 0) {
             log_event(client_id, "ERROR",
-                      "op=pthread_mutex_lock error_code=%d error_text=\"%s\"",
+                      "op=pthread_mutex_unlock error_code=%d error_text=\"%s\"",
                       rc, strerror(rc));
-            disconnect_active_unknown = 1;
-        } else {
-            active_n = --active_connections;
-            rc = pthread_mutex_unlock(&server_state_mutex);
-            if (rc != 0) {
-                log_event(client_id, "ERROR",
-                          "op=pthread_mutex_unlock error_code=%d error_text=\"%s\"",
-                          rc, strerror(rc));
-            }
         }
-    } else {
-        disconnect_active_unknown = 1;
     }
+
+    emit_session_end(client_id, reason, messages_sent, messages_received,
+                     malformed_messages, bytes_sent, bytes_received,
+                     completed_exchanges, &conn_start, have_conn_start,
+                     have_totals, total_connections_accepted,
+                     total_spawn_failures, total_sessions_ok,
+                     total_sessions_failed);
 
     if (disconnect_active_unknown) {
         log_event(client_id, "DISCONNECT", "active_connections=unknown");
@@ -454,6 +535,7 @@ int main(int argc, char *argv[])
             close(client_fd);
             continue;
         }
+        connections_accepted++;
         client_id = next_client_id++;
         have_client_id = 1;
         rc = pthread_mutex_unlock(&server_state_mutex);
@@ -463,6 +545,11 @@ int main(int argc, char *argv[])
 
         struct worker_arg *warg = malloc(sizeof(*warg));
         if (warg == NULL) {
+            rc = pthread_mutex_lock(&server_state_mutex);
+            if (rc == 0) {
+                spawn_failures++;
+                pthread_mutex_unlock(&server_state_mutex);
+            }
             if (have_client_id) {
                 log_event(client_id, "SPAWN_FAIL",
                           "error_text=\"out of memory\"");
@@ -488,9 +575,15 @@ int main(int argc, char *argv[])
         pthread_t thread;
         rc = pthread_create(&thread, &attr, client_thread, warg);
         if (rc != 0) {
+            int create_rc = rc;
+            rc = pthread_mutex_lock(&server_state_mutex);
+            if (rc == 0) {
+                spawn_failures++;
+                pthread_mutex_unlock(&server_state_mutex);
+            }
             log_event(client_id, "SPAWN_FAIL",
                       "error_code=%d error_text=\"%s\"",
-                      rc, strerror(rc));
+                      create_rc, strerror(create_rc));
             free(warg);
             close(client_fd);
             continue;
