@@ -416,3 +416,115 @@ def assert_latency_injection(
         failures.append(f"injection_count must be >= 1, got {injection_count}")
 
     return failures
+
+
+def assert_server_crash_mid_session(
+    crash_count: int,
+    client_exit_code: int | None,
+    server_exit_code: int | None,
+    client_events: list[LogEvent],
+    server_events: list[LogEvent],
+    connect_observed: bool,
+    client_stopped: bool,
+    client_resumed: bool,
+    cleanup_ok: bool,
+    server_session: str | None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Assert server_crash_mid_session outcomes. No process control or printing."""
+    failures: list[str] = []
+    metrics: dict[str, Any] = {
+        "crash_count": crash_count,
+        "connect_observed": connect_observed,
+        "client_stopped": client_stopped,
+        "client_resumed": client_resumed,
+        "cleanup_ok": cleanup_ok,
+    }
+
+    if client_exit_code is not None:
+        metrics["client_exit_code"] = client_exit_code
+    if server_exit_code is not None:
+        metrics["server_exit_code"] = server_exit_code
+    if server_session is not None:
+        metrics["server_session"] = server_session
+
+    if not connect_observed:
+        failures.append("server CONNECT was not observed before crash")
+    if not client_stopped:
+        failures.append("client was not confirmed stopped (SIGSTOP) before server kill")
+    if not client_resumed:
+        failures.append("client was not resumed (SIGCONT) after server kill")
+    if not cleanup_ok:
+        failures.append("cleanup_ok is false: processes were not fully reaped")
+
+    if client_exit_code is None:
+        failures.append("client exit code missing")
+    elif client_exit_code == 0:
+        failures.append(
+            f"client exit code: expected nonzero after server crash, got {client_exit_code}"
+        )
+
+    attempts = _events_named(client_events, "CONNECT_ATTEMPT")
+    oks = _events_named(client_events, "CONNECT_OK")
+    fails = _events_named(client_events, "CONNECT_FAIL")
+    ends = _events_named(client_events, "SESSION_END")
+
+    if len(attempts) != 1:
+        failures.append(
+            f"client CONNECT_ATTEMPT: expected exactly 1, got {len(attempts)}"
+        )
+    if len(oks) != 1:
+        failures.append(
+            f"client CONNECT_OK: expected exactly 1, got {len(oks)}"
+        )
+    if len(fails) != 0:
+        failures.append(
+            f"client CONNECT_FAIL: expected 0, got {len(fails)}"
+        )
+    if len(ends) != 1:
+        failures.append(
+            f"client SESSION_END: expected exactly 1, got {len(ends)}"
+        )
+    else:
+        end = ends[0]
+        reason = end.fields.get("reason")
+        metrics["client_session_reason"] = reason
+        if reason == "bye":
+            failures.append(
+                "client SESSION_END reason: expected non-bye after crash, got bye"
+            )
+
+        msg_sent = _require_int(
+            end.fields, "messages_sent", failures, "client SESSION_END"
+        )
+        msg_recv = _require_int(
+            end.fields, "messages_received", failures, "client SESSION_END"
+        )
+        if msg_sent is not None:
+            metrics["client_messages_sent"] = msg_sent
+        if msg_recv is not None:
+            metrics["client_messages_received"] = msg_recv
+            if msg_recv >= crash_count:
+                failures.append(
+                    "client messages_received: expected < crash_count "
+                    f"{crash_count}, got {msg_recv}"
+                )
+
+    # Server: CONNECT required; SESSION_END/DISCONNECT must NOT be required
+    # because SIGKILL prevents worker cleanup.
+    if server_session is not None:
+        sess = _session_events(server_events, server_session)
+        connects = [e for e in sess if e.event == "CONNECT"]
+        if len(connects) != 1:
+            failures.append(
+                f"server session {server_session} CONNECT: "
+                f"expected exactly 1, got {len(connects)}"
+            )
+        # Explicitly do not require SESSION_END / DISCONNECT after SIGKILL.
+        ends_srv = [e for e in sess if e.event == "SESSION_END"]
+        discs = [e for e in sess if e.event == "DISCONNECT"]
+        metrics["server_session_end_count"] = len(ends_srv)
+        metrics["server_disconnect_count"] = len(discs)
+    elif connect_observed:
+        failures.append("server_session missing despite CONNECT observation")
+
+    return failures, metrics

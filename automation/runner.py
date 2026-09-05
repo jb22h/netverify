@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import select
+import signal
 import socket
 import subprocess
 import sys
@@ -18,6 +21,7 @@ from assertions import (
     assert_basic_ping_pong,
     assert_connect_fail_no_server,
     assert_latency_injection,
+    assert_server_crash_mid_session,
 )
 from logparse import parse_log_text
 
@@ -25,14 +29,17 @@ VALID_TESTS = (
     "basic_ping_pong",
     "connect_fail_no_server",
     "latency_injection",
+    "server_crash_mid_session",
 )
 # Ordinary --all stays non-privileged (no latency_injection / sudo).
 ALL_TESTS = (
     "basic_ping_pong",
     "connect_fail_no_server",
+    "server_crash_mid_session",
 )
 
 LATENCY_DELAY_MS = 100
+CLIENT_COUNT_MAX = 1000000
 
 
 @dataclass
@@ -110,8 +117,22 @@ def is_tcp_port_listening(port: int) -> bool:
     return False
 
 
+def _drain_pipe_text(stream: Any) -> str:
+    if stream is None:
+        return ""
+    try:
+        data = stream.read()
+    except (OSError, ValueError):
+        return ""
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data
+
+
 def wait_for_server_ready(
-    server_proc: subprocess.Popen[str],
+    server_proc: subprocess.Popen[Any],
     port: int,
     timeout_s: float = 5.0,
     poll_s: float = 0.05,
@@ -120,12 +141,7 @@ def wait_for_server_ready(
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if server_proc.poll() is not None:
-            stderr = ""
-            if server_proc.stderr is not None:
-                try:
-                    stderr = server_proc.stderr.read()
-                except OSError:
-                    stderr = ""
+            stderr = _drain_pipe_text(server_proc.stderr)
             return (
                 f"server exited during startup with code {server_proc.returncode}"
                 + (f"; stderr:\n{stderr}" if stderr else "")
@@ -181,6 +197,16 @@ def print_human(result: TestResult) -> None:
             "baseline_rtt_avg_us",
             "injected_rtt_avg_us",
             "rtt_delta_us",
+            "cleanup_ok",
+        ):
+            if key in result.metrics:
+                print(f"{key}: {result.metrics[key]}")
+    if result.name == "server_crash_mid_session":
+        for key in (
+            "crash_count",
+            "server_session",
+            "client_session_reason",
+            "client_messages_received",
             "cleanup_ok",
         ):
             if key in result.metrics:
@@ -575,6 +601,356 @@ def run_latency_injection(root: Path, requested_count: int) -> TestResult:
     )
 
 
+def _proc_state(pid: int) -> str | None:
+    try:
+        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as status:
+            for line in status:
+                if line.startswith("State:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return parts[1]
+    except OSError:
+        return None
+    return None
+
+
+def _wait_proc_stopped(pid: int, timeout_s: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        state = _proc_state(pid)
+        if state is None:
+            return False
+        if state in ("T", "t"):
+            return True
+        time.sleep(0.01)
+    state = _proc_state(pid)
+    return state in ("T", "t")
+
+
+def _wait_for_server_connect(
+    server_proc: subprocess.Popen[Any],
+    timeout_s: float = 10.0,
+) -> tuple[list[str], str | None, str | None]:
+    """Read server stderr until event=CONNECT.
+
+    Returns (lines_so_far, server_session_or_none, error_or_none).
+    """
+    lines: list[str] = []
+    buf = ""
+    deadline = time.monotonic() + timeout_s
+    stderr = server_proc.stderr
+    if stderr is None:
+        return lines, None, "server stderr is not available"
+
+    while time.monotonic() < deadline:
+        if server_proc.poll() is not None:
+            try:
+                rest = stderr.read() or b""
+            except OSError:
+                rest = b""
+            if isinstance(rest, str):
+                rest_s = rest
+            else:
+                rest_s = rest.decode("utf-8", errors="replace")
+            if rest_s:
+                buf += rest_s
+            if buf:
+                for piece in buf.splitlines():
+                    lines.append(piece)
+            return lines, None, (
+                f"server exited before CONNECT (code {server_proc.returncode})"
+            )
+
+        ready, _, _ = select.select([stderr], [], [], 0.05)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(stderr.fileno(), 4096)
+        except OSError:
+            continue
+        if not chunk:
+            continue
+        buf += chunk.decode("utf-8", errors="replace")
+        while "\n" in buf:
+            line, buf = buf.split("\n", 1)
+            line = line.rstrip("\r")
+            lines.append(line)
+            events = parse_log_text(line + "\n")
+            for ev in events:
+                if ev.event == "CONNECT":
+                    return lines, ev.session, None
+
+    if buf.strip():
+        lines.append(buf.rstrip("\r\n"))
+    return lines, None, f"timed out waiting for server CONNECT after {timeout_s}s"
+
+
+def _reap_process(proc: subprocess.Popen[Any] | None, *, force: bool = False) -> int | None:
+    if proc is None:
+        return None
+    if proc.poll() is None:
+        if force:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        else:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=2)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+    try:
+        if proc.poll() is None:
+            proc.wait(timeout=1)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return proc.poll()
+
+
+def run_server_crash_mid_session(root: Path, requested_count: int) -> TestResult:
+    name = "server_crash_mid_session"
+    started = time.monotonic()
+    crash_count = min(CLIENT_COUNT_MAX, max(requested_count, 100000))
+    metrics: dict[str, Any] = {
+        "requested_count": requested_count,
+        "crash_count": crash_count,
+        "connect_observed": False,
+        "client_stopped": False,
+        "client_resumed": False,
+        "cleanup_ok": False,
+    }
+
+    binaries = resolve_binaries(root)
+    if isinstance(binaries, str):
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=[binaries],
+            client_exit_code=None,
+            duration_s=time.monotonic() - started,
+            metrics={**metrics, "setup_error": True},
+        )
+
+    server_bin, client_bin = binaries
+    port = pick_free_port()
+    metrics["port"] = port
+
+    server_proc: subprocess.Popen[str] | None = None
+    client_proc: subprocess.Popen[str] | None = None
+    client_was_stopped = False
+    server_lines: list[str] = []
+    server_session: str | None = None
+    client_stderr = ""
+    client_exit: int | None = None
+    server_exit: int | None = None
+    sync_error: str | None = None
+    early_failures: list[str] = []
+
+    try:
+        server_proc = subprocess.Popen(
+            [str(server_bin), "--port", str(port)],
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        ready_err = wait_for_server_ready(server_proc, port)
+        if ready_err is not None:
+            return TestResult(
+                name=name,
+                passed=False,
+                failures=[ready_err],
+                client_exit_code=None,
+                duration_s=time.monotonic() - started,
+                metrics={**metrics, "setup_error": True},
+            )
+
+        client_proc = subprocess.Popen(
+            [
+                str(client_bin),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--count",
+                str(crash_count),
+            ],
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        server_lines, server_session, sync_error = _wait_for_server_connect(
+            server_proc, timeout_s=10.0
+        )
+        if sync_error is not None:
+            early_failures.append(sync_error)
+        else:
+            metrics["connect_observed"] = True
+            metrics["server_session"] = server_session
+
+        if client_proc.poll() is not None:
+            early_failures.append(
+                f"client exited before SIGSTOP (code {client_proc.returncode})"
+            )
+        elif sync_error is None:
+            try:
+                os.kill(client_proc.pid, signal.SIGSTOP)
+            except OSError as exc:
+                early_failures.append(f"SIGSTOP failed: {exc}")
+            else:
+                if _wait_proc_stopped(client_proc.pid):
+                    client_was_stopped = True
+                    metrics["client_stopped"] = True
+                else:
+                    early_failures.append(
+                        "client did not enter stopped state after SIGSTOP"
+                    )
+
+        if client_was_stopped and server_proc.poll() is None:
+            server_proc.kill()
+            try:
+                server_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                early_failures.append("server did not exit after SIGKILL")
+            server_exit = server_proc.poll()
+            metrics["server_exit_code"] = server_exit
+        elif server_proc is not None and server_proc.poll() is None:
+            # Crash path not reached; still stop server in cleanup.
+            pass
+
+        # Drain any remaining server stderr after death / before resume.
+        if server_proc is not None:
+            rest = _drain_pipe_text(server_proc.stderr)
+            if rest:
+                for piece in rest.splitlines():
+                    server_lines.append(piece.rstrip("\r"))
+
+        if client_was_stopped and client_proc.poll() is None:
+            try:
+                os.kill(client_proc.pid, signal.SIGCONT)
+                metrics["client_resumed"] = True
+            except OSError as exc:
+                early_failures.append(f"SIGCONT failed: {exc}")
+                metrics["client_resumed"] = False
+            else:
+                client_was_stopped = False
+                try:
+                    client_exit = client_proc.wait(timeout=30.0)
+                except subprocess.TimeoutExpired:
+                    early_failures.append("client did not exit within 30s after resume")
+                    try:
+                        client_proc.kill()
+                    except OSError:
+                        pass
+                    try:
+                        client_exit = client_proc.wait(timeout=5)
+                    except (subprocess.TimeoutExpired, OSError):
+                        client_exit = client_proc.poll()
+                client_stderr = _drain_pipe_text(client_proc.stderr)
+                _drain_pipe_text(client_proc.stdout)
+        elif client_proc is not None:
+            # Client never stopped successfully; still collect output.
+            if client_proc.poll() is None:
+                try:
+                    client_exit = client_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            client_exit = client_proc.poll() if client_exit is None else client_exit
+            client_stderr = _drain_pipe_text(client_proc.stderr)
+            _drain_pipe_text(client_proc.stdout)
+
+    finally:
+        cleanup_ok = True
+
+        # Ensure client is not left stopped.
+        if client_proc is not None and client_proc.poll() is None:
+            state = _proc_state(client_proc.pid)
+            if state in ("T", "t") or client_was_stopped:
+                try:
+                    os.kill(client_proc.pid, signal.SIGCONT)
+                    metrics["client_resumed"] = True
+                except OSError:
+                    cleanup_ok = False
+                client_was_stopped = False
+
+        if client_proc is not None and client_proc.poll() is None:
+            code = _reap_process(client_proc, force=False)
+            if client_proc.poll() is None:
+                code = _reap_process(client_proc, force=True)
+            if client_exit is None:
+                client_exit = code
+            if client_proc.poll() is not None and not client_stderr:
+                client_stderr = _drain_pipe_text(client_proc.stderr)
+                _drain_pipe_text(client_proc.stdout)
+
+        if server_proc is not None and server_proc.poll() is None:
+            code = _reap_process(server_proc, force=True)
+            if server_exit is None:
+                server_exit = code
+            rest = _drain_pipe_text(server_proc.stderr)
+            if rest:
+                for piece in rest.splitlines():
+                    server_lines.append(piece.rstrip("\r"))
+
+        if client_proc is not None and client_proc.poll() is None:
+            cleanup_ok = False
+        if server_proc is not None and server_proc.poll() is None:
+            cleanup_ok = False
+        if client_proc is not None and client_proc.poll() is None:
+            state = _proc_state(client_proc.pid)
+            if state in ("T", "t"):
+                cleanup_ok = False
+
+        metrics["cleanup_ok"] = cleanup_ok
+        if client_exit is not None:
+            metrics["client_exit_code"] = client_exit
+        if server_exit is not None:
+            metrics["server_exit_code"] = server_exit
+
+    server_log = "\n".join(server_lines)
+    if server_lines:
+        server_log += "\n"
+    client_events = parse_log_text(client_stderr)
+    server_events = parse_log_text(server_log)
+
+    failures, assert_metrics = assert_server_crash_mid_session(
+        crash_count,
+        client_exit,
+        server_exit,
+        client_events,
+        server_events,
+        bool(metrics.get("connect_observed")),
+        bool(metrics.get("client_stopped")),
+        bool(metrics.get("client_resumed")),
+        bool(metrics.get("cleanup_ok")),
+        server_session,
+    )
+    metrics.update(assert_metrics)
+    failures = early_failures + failures
+
+    return TestResult(
+        name=name,
+        passed=len(failures) == 0,
+        failures=failures,
+        client_exit_code=client_exit,
+        duration_s=time.monotonic() - started,
+        metrics=metrics,
+    )
+
+
 def run_named_test(root: Path, name: str, count: int) -> TestResult:
     if name == "basic_ping_pong":
         return run_basic_ping_pong(root, count)
@@ -582,6 +958,8 @@ def run_named_test(root: Path, name: str, count: int) -> TestResult:
         return run_connect_fail_no_server(root)
     if name == "latency_injection":
         return run_latency_injection(root, count)
+    if name == "server_crash_mid_session":
+        return run_server_crash_mid_session(root, count)
     return TestResult(
         name=name,
         passed=False,
@@ -637,7 +1015,8 @@ def main(argv: list[str] | None = None) -> int:
         selected = ["basic_ping_pong"]
 
     needs_server = any(
-        t in ("basic_ping_pong", "latency_injection") for t in selected
+        t in ("basic_ping_pong", "latency_injection", "server_crash_mid_session")
+        for t in selected
     )
     if needs_server:
         binaries = resolve_binaries(root)
