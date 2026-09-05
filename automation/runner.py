@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NetVerify automation runner (Phases 5–6)."""
+"""NetVerify automation runner (Phases 5–7)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any
 import netem
 from assertions import (
     assert_basic_ping_pong,
+    assert_concurrent_load,
     assert_connect_fail_no_server,
     assert_latency_injection,
     assert_server_crash_mid_session,
@@ -30,8 +32,10 @@ VALID_TESTS = (
     "connect_fail_no_server",
     "latency_injection",
     "server_crash_mid_session",
+    "concurrent_load",
 )
 # Ordinary --all stays non-privileged (no latency_injection / sudo).
+# concurrent_load is opt-in until verified; not in ALL_TESTS yet.
 ALL_TESTS = (
     "basic_ping_pong",
     "connect_fail_no_server",
@@ -40,6 +44,7 @@ ALL_TESTS = (
 
 LATENCY_DELAY_MS = 100
 CLIENT_COUNT_MAX = 1000000
+CONCURRENT_CLIENTS_MAX = 1000
 
 
 @dataclass
@@ -185,6 +190,32 @@ def stop_server(server_proc: subprocess.Popen[str]) -> tuple[str, str]:
 def print_human(result: TestResult) -> None:
     status = "PASS" if result.passed else "FAIL"
     print(f"{result.name}: {status}")
+    if result.name == "concurrent_load":
+        m = result.metrics
+        launched = m.get("clients_launched", m.get("clients_requested"))
+        succeeded = m.get("clients_succeeded")
+        if launched is not None and succeeded is not None:
+            print(f"clients: {succeeded}/{launched}")
+        if "messages_per_client" in m:
+            print(f"messages_per_client: {m['messages_per_client']}")
+        if "total_completed_messages" in m:
+            print(f"total_messages: {m['total_completed_messages']}")
+        for key in (
+            "peak_active_connections",
+            "aggregate_messages_per_s",
+            "aggregate_bytes_per_s",
+        ):
+            if key in m:
+                val = m[key]
+                if isinstance(val, float):
+                    print(f"{key}: {val:.3f}")
+                else:
+                    print(f"{key}: {val}")
+        print(f"duration_s: {result.duration_s:.3f}")
+        for failure in result.failures:
+            print(f"- {failure}")
+        return
+
     print(f"client_exit_code: {result.client_exit_code}")
     if "requested_count" in result.metrics:
         print(f"messages: {result.metrics['requested_count']}")
@@ -951,7 +982,252 @@ def run_server_crash_mid_session(root: Path, requested_count: int) -> TestResult
     )
 
 
-def run_named_test(root: Path, name: str, count: int) -> TestResult:
+def concurrent_load_timeout_s(clients: int, count: int) -> float:
+    """Bounded overall client deadline (concurrency-aware, not N*M)."""
+    return min(
+        300.0,
+        max(30.0, 20.0 + float(count) * 0.02 + float(clients) * 0.10),
+    )
+
+
+def _collect_linux_proc_metrics(pid: int) -> dict[str, Any]:
+    """Observational /proc CPU and memory metrics for a live process."""
+    out: dict[str, Any] = {}
+    try:
+        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as status:
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        out["server_vm_rss_kb"] = int(parts[1])
+                elif line.startswith("VmHWM:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        out["server_vm_hwm_kb"] = int(parts[1])
+    except (OSError, ValueError):
+        pass
+
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as stat_f:
+            content = stat_f.read()
+        close_paren = content.rfind(")")
+        if close_paren != -1:
+            rest = content[close_paren + 2 :].split()
+            # After comm: state(0) ... utime(11) stime(12)
+            if len(rest) > 12:
+                utime = int(rest[11])
+                stime = int(rest[12])
+                ticks = os.sysconf("SC_CLK_TCK")
+                if ticks and ticks > 0:
+                    out["server_cpu_time_s"] = (utime + stime) / float(ticks)
+    except (OSError, ValueError):
+        pass
+
+    return out
+
+
+def _read_temp_text(file_obj: Any) -> str:
+    if file_obj is None:
+        return ""
+    try:
+        file_obj.seek(0)
+        data = file_obj.read()
+    except (OSError, ValueError):
+        return ""
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data
+
+
+def run_concurrent_load(root: Path, clients: int, count: int) -> TestResult:
+    name = "concurrent_load"
+    wall_started = time.monotonic()
+
+    binaries = resolve_binaries(root)
+    if isinstance(binaries, str):
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=[binaries],
+            client_exit_code=None,
+            duration_s=time.monotonic() - wall_started,
+            metrics={"setup_error": True, "clients_requested": clients},
+        )
+
+    server_bin, client_bin = binaries
+    port = pick_free_port()
+    load_timeout = concurrent_load_timeout_s(clients, count)
+
+    server_proc: subprocess.Popen[Any] | None = None
+    server_out_file: Any = None
+    server_err_file: Any = None
+    client_procs: list[subprocess.Popen[str]] = []
+    client_exit_codes: list[int | None] = []
+    client_events_list: list[list[Any]] = []
+    load_duration_s = 0.0
+    load_start: float | None = None
+    early_failures: list[str] = []
+    proc_metrics: dict[str, Any] = {}
+    server_stderr = ""
+    timed_out_indexes: set[int] = set()
+    setup_error: str | None = None
+
+    try:
+        server_out_file = tempfile.TemporaryFile()
+        server_err_file = tempfile.TemporaryFile()
+        server_proc = subprocess.Popen(
+            [str(server_bin), "--port", str(port)],
+            cwd=str(root),
+            stdout=server_out_file,
+            stderr=server_err_file,
+        )
+
+        ready_err = wait_for_server_ready(server_proc, port)
+        if ready_err is not None:
+            setup_error = ready_err
+        else:
+            load_start = time.monotonic()
+            deadline = load_start + load_timeout
+
+            for _ in range(clients):
+                try:
+                    proc = subprocess.Popen(
+                        [
+                            str(client_bin),
+                            "--host",
+                            "127.0.0.1",
+                            "--port",
+                            str(port),
+                            "--count",
+                            str(count),
+                        ],
+                        cwd=str(root),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                except OSError as exc:
+                    early_failures.append(f"failed to start client: {exc}")
+                    break
+                client_procs.append(proc)
+
+            while time.monotonic() < deadline:
+                if all(p.poll() is not None for p in client_procs):
+                    break
+                time.sleep(0.01)
+
+            for i, proc in enumerate(client_procs):
+                if proc.poll() is None:
+                    timed_out_indexes.add(i)
+
+    except OSError as exc:
+        if setup_error is None:
+            early_failures.append(f"failed to start process: {exc}")
+    finally:
+        # Reap every client, then collect exit codes and stderr exactly once.
+        for i, proc in enumerate(client_procs):
+            if proc.poll() is None:
+                _reap_process(proc, force=False)
+                if proc.poll() is None:
+                    _reap_process(proc, force=True)
+            exit_code = proc.poll()
+            stderr = _drain_pipe_text(proc.stderr)
+            _drain_pipe_text(proc.stdout)
+            if i in timed_out_indexes:
+                early_failures.append(
+                    f"client[{i}] timed out after {load_timeout:.1f}s"
+                    + (f" (exit {exit_code})" if exit_code is not None else "")
+                )
+            client_exit_codes.append(exit_code)
+            client_events_list.append(parse_log_text(stderr))
+
+        if load_start is not None:
+            load_duration_s = time.monotonic() - load_start
+
+        # Observational /proc metrics while server is still alive.
+        if server_proc is not None and server_proc.poll() is None:
+            try:
+                proc_metrics = _collect_linux_proc_metrics(server_proc.pid)
+            except (OSError, AttributeError):
+                proc_metrics = {}
+
+        if server_proc is not None and server_proc.poll() is None:
+            _reap_process(server_proc, force=False)
+            if server_proc.poll() is None:
+                _reap_process(server_proc, force=True)
+
+        server_stderr = _read_temp_text(server_err_file)
+        _read_temp_text(server_out_file)
+
+        for file_obj in (server_out_file, server_err_file):
+            if file_obj is not None:
+                try:
+                    file_obj.close()
+                except OSError:
+                    pass
+
+        if server_proc is not None and server_proc.poll() is None:
+            early_failures.append("server process still running after cleanup")
+        for i, proc in enumerate(client_procs):
+            if proc.poll() is None:
+                early_failures.append(f"client[{i}] still running after cleanup")
+
+    if setup_error is not None:
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=[setup_error],
+            client_exit_code=None,
+            duration_s=time.monotonic() - wall_started,
+            metrics={
+                "port": port,
+                "setup_error": True,
+                "clients_requested": clients,
+            },
+        )
+
+    if not client_exit_codes and clients > 0:
+        early_failures.append("no clients were launched")
+
+    server_events = parse_log_text(server_stderr)
+    failures, metrics = assert_concurrent_load(
+        clients,
+        count,
+        client_exit_codes,
+        client_events_list,
+        server_events,
+        load_duration_s,
+    )
+    failures = early_failures + failures
+    metrics["port"] = port
+    metrics["load_timeout_s"] = load_timeout
+    metrics.update(proc_metrics)
+
+    client_exit: int | None = None
+    if client_exit_codes:
+        if all(c == 0 for c in client_exit_codes):
+            client_exit = 0
+        else:
+            for c in client_exit_codes:
+                if c != 0:
+                    client_exit = c
+                    break
+
+    return TestResult(
+        name=name,
+        passed=len(failures) == 0,
+        failures=failures,
+        client_exit_code=client_exit,
+        duration_s=load_duration_s,
+        metrics=metrics,
+    )
+
+
+def run_named_test(
+    root: Path, name: str, count: int, clients: int = 10
+) -> TestResult:
     if name == "basic_ping_pong":
         return run_basic_ping_pong(root, count)
     if name == "connect_fail_no_server":
@@ -960,6 +1236,8 @@ def run_named_test(root: Path, name: str, count: int) -> TestResult:
         return run_latency_injection(root, count)
     if name == "server_crash_mid_session":
         return run_server_crash_mid_session(root, count)
+    if name == "concurrent_load":
+        return run_concurrent_load(root, clients, count)
     return TestResult(
         name=name,
         passed=False,
@@ -979,6 +1257,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=100,
         help="PING/PONG count for basic_ping_pong / latency baseline (default: 100)",
+    )
+    parser.add_argument(
+        "--clients",
+        type=int,
+        default=10,
+        help="concurrent client count for concurrent_load (default: 10)",
     )
     parser.add_argument(
         "--json",
@@ -1004,6 +1288,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.count < 1:
         print("error: --count must be >= 1", file=sys.stderr)
         return 2
+    if args.clients < 1 or args.clients > CONCURRENT_CLIENTS_MAX:
+        print(
+            f"error: --clients must be between 1 and {CONCURRENT_CLIENTS_MAX}",
+            file=sys.stderr,
+        )
+        return 2
 
     root = project_root()
 
@@ -1015,7 +1305,13 @@ def main(argv: list[str] | None = None) -> int:
         selected = ["basic_ping_pong"]
 
     needs_server = any(
-        t in ("basic_ping_pong", "latency_injection", "server_crash_mid_session")
+        t
+        in (
+            "basic_ping_pong",
+            "latency_injection",
+            "server_crash_mid_session",
+            "concurrent_load",
+        )
         for t in selected
     )
     if needs_server:
@@ -1032,7 +1328,7 @@ def main(argv: list[str] | None = None) -> int:
     results: list[TestResult] = []
     for name in selected:
         try:
-            result = run_named_test(root, name, args.count)
+            result = run_named_test(root, name, args.count, clients=args.clients)
         except Exception as exc:  # noqa: BLE001
             result = TestResult(
                 name=name,

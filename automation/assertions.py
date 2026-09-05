@@ -528,3 +528,336 @@ def assert_server_crash_mid_session(
         failures.append("server_session missing despite CONNECT observation")
 
     return failures, metrics
+
+
+def assert_concurrent_load(
+    clients_requested: int,
+    messages_per_client: int,
+    client_exit_codes: list[int | None],
+    client_events_list: list[list[LogEvent]],
+    server_events: list[LogEvent],
+    duration_s: float,
+) -> tuple[list[str], dict[str, Any]]:
+    """Assert concurrent_load correctness and build aggregate metrics.
+
+    Does not launch processes, print, or sleep.
+    Aggregate bytes are client-observed TCP payload (bytes_sent + bytes_received).
+    rtt_avg_of_avgs_us is the mean of per-client rtt_avg_us values (not a global mean).
+    """
+    failures: list[str] = []
+    n = clients_requested
+    m = messages_per_client
+    metrics: dict[str, Any] = {
+        "clients_requested": n,
+        "messages_per_client": m,
+        "total_expected_messages": n * m,
+        "duration_s": duration_s,
+    }
+
+    if len(client_exit_codes) != n:
+        failures.append(
+            f"clients launched: expected {n}, got {len(client_exit_codes)}"
+        )
+    if len(client_events_list) != n:
+        failures.append(
+            f"client event lists: expected {n}, got {len(client_events_list)}"
+        )
+    if len(client_exit_codes) != len(client_events_list):
+        failures.append(
+            "client exit codes and event lists length mismatch: "
+            f"{len(client_exit_codes)} vs {len(client_events_list)}"
+        )
+
+    metrics["clients_launched"] = len(client_exit_codes)
+    launched = min(len(client_exit_codes), len(client_events_list))
+
+    succeeded = 0
+    total_completed = 0
+    aggregate_bytes = 0
+    rtt_mins: list[int] = []
+    rtt_maxs: list[int] = []
+    rtt_avgs: list[int] = []
+    failed_clients: list[dict[str, Any]] = []
+
+    for i in range(launched):
+        exit_code = client_exit_codes[i]
+        events = client_events_list[i]
+        prefix = f"client[{i}]"
+        client_fail_before = len(failures)
+
+        if exit_code != 0:
+            failures.append(f"{prefix} exit code: expected 0, got {exit_code!r}")
+
+        attempts = _events_named(events, "CONNECT_ATTEMPT")
+        oks = _events_named(events, "CONNECT_OK")
+        fails = _events_named(events, "CONNECT_FAIL")
+        ends = _events_named(events, "SESSION_END")
+
+        if len(attempts) != 1:
+            failures.append(
+                f"{prefix} CONNECT_ATTEMPT: expected exactly 1, got {len(attempts)}"
+            )
+        if len(oks) != 1:
+            failures.append(
+                f"{prefix} CONNECT_OK: expected exactly 1, got {len(oks)}"
+            )
+        if len(fails) != 0:
+            failures.append(
+                f"{prefix} CONNECT_FAIL: expected 0, got {len(fails)}"
+            )
+        if len(ends) != 1:
+            failures.append(
+                f"{prefix} SESSION_END: expected exactly 1, got {len(ends)}"
+            )
+        else:
+            end = ends[0]
+            end_prefix = f"{prefix} SESSION_END"
+            reason = end.fields.get("reason")
+            if reason != "bye":
+                failures.append(
+                    f"{end_prefix} reason: expected bye, got {reason!r}"
+                )
+
+            msg_sent = _require_int(
+                end.fields, "messages_sent", failures, end_prefix
+            )
+            msg_recv = _require_int(
+                end.fields, "messages_received", failures, end_prefix
+            )
+            malformed = _require_int(
+                end.fields, "malformed_messages", failures, end_prefix
+            )
+
+            bytes_sent: int | None = None
+            bytes_recv: int | None = None
+            raw_bs = end.fields.get("bytes_sent")
+            raw_br = end.fields.get("bytes_received")
+            if raw_bs is not None:
+                try:
+                    bytes_sent = int(raw_bs)
+                except ValueError:
+                    pass
+            if raw_br is not None:
+                try:
+                    bytes_recv = int(raw_br)
+                except ValueError:
+                    pass
+
+            if msg_sent is not None and msg_sent != m:
+                failures.append(
+                    f"{end_prefix} messages_sent: expected {m}, got {msg_sent}"
+                )
+            if msg_recv is not None and msg_recv != m:
+                failures.append(
+                    f"{end_prefix} messages_received: expected {m}, got {msg_recv}"
+                )
+            if malformed is not None and malformed != 0:
+                failures.append(
+                    f"{end_prefix} malformed_messages: expected 0, got {malformed}"
+                )
+
+            client_ok = (
+                exit_code == 0
+                and len(attempts) == 1
+                and len(oks) == 1
+                and len(fails) == 0
+                and reason == "bye"
+                and msg_sent == m
+                and msg_recv == m
+                and malformed == 0
+            )
+            if client_ok:
+                succeeded += 1
+                if msg_sent is not None:
+                    total_completed += msg_sent
+                if bytes_sent is not None and bytes_recv is not None:
+                    aggregate_bytes += bytes_sent + bytes_recv
+                for key, bucket in (
+                    ("rtt_min_us", rtt_mins),
+                    ("rtt_max_us", rtt_maxs),
+                    ("rtt_avg_us", rtt_avgs),
+                ):
+                    raw = end.fields.get(key)
+                    if raw is None:
+                        continue
+                    try:
+                        bucket.append(int(raw))
+                    except ValueError:
+                        pass
+
+        if len(failures) > client_fail_before:
+            reason_parts = [
+                f
+                for f in failures[client_fail_before:]
+                if f.startswith(prefix)
+            ]
+            short = reason_parts[0] if reason_parts else "client failed"
+            if short.startswith(prefix + " "):
+                short = short[len(prefix) + 1 :]
+            failed_clients.append(
+                {
+                    "index": i,
+                    "exit_code": exit_code,
+                    "reason": short,
+                }
+            )
+
+    metrics["clients_succeeded"] = succeeded
+    metrics["clients_failed"] = max(0, n - succeeded)
+    metrics["total_completed_messages"] = total_completed
+    metrics["aggregate_bytes"] = aggregate_bytes
+    # Client-observed TCP payload bytes (sent + received), not double-counted
+    # with server-side bytes.
+    if duration_s > 0:
+        metrics["aggregate_messages_per_s"] = total_completed / duration_s
+        metrics["aggregate_bytes_per_s"] = aggregate_bytes / duration_s
+    else:
+        metrics["aggregate_messages_per_s"] = 0.0
+        metrics["aggregate_bytes_per_s"] = 0.0
+
+    if rtt_mins:
+        metrics["rtt_min_us"] = min(rtt_mins)
+    if rtt_maxs:
+        metrics["rtt_max_us"] = max(rtt_maxs)
+    if rtt_avgs:
+        metrics["rtt_avg_of_avgs_us"] = int(sum(rtt_avgs) / len(rtt_avgs))
+
+    if failed_clients:
+        metrics["failed_clients"] = failed_clients
+
+    connects = _events_named(server_events, "CONNECT")
+    all_session_ends = _events_named(server_events, "SESSION_END")
+    quit_ends = [
+        e for e in all_session_ends if e.fields.get("reason") == "quit"
+    ]
+    disconnects = _events_named(server_events, "DISCONNECT")
+
+    if len(connects) != n:
+        failures.append(
+            f"server CONNECT: expected exactly {n}, got {len(connects)}"
+        )
+    if len(all_session_ends) != n:
+        failures.append(
+            f"server SESSION_END: expected exactly {n}, got {len(all_session_ends)}"
+        )
+    if len(quit_ends) != n:
+        failures.append(
+            "server SESSION_END reason=quit: "
+            f"expected exactly {n}, got {len(quit_ends)}"
+        )
+    if len(disconnects) != n:
+        failures.append(
+            f"server DISCONNECT: expected exactly {n}, got {len(disconnects)}"
+        )
+
+    session_ids = sorted({e.session for e in connects})
+    for sid in session_ids:
+        sess = _session_events(server_events, sid)
+        s_connects = [e for e in sess if e.event == "CONNECT"]
+        s_ends = [e for e in sess if e.event == "SESSION_END"]
+        s_discs = [e for e in sess if e.event == "DISCONNECT"]
+        sp = f"server session {sid}"
+
+        if len(s_connects) != 1:
+            failures.append(
+                f"{sp} CONNECT: expected exactly 1, got {len(s_connects)}"
+            )
+        if len(s_ends) != 1:
+            failures.append(
+                f"{sp} SESSION_END: expected exactly 1, got {len(s_ends)}"
+            )
+        if len(s_discs) != 1:
+            failures.append(
+                f"{sp} DISCONNECT: expected exactly 1, got {len(s_discs)}"
+            )
+
+        if len(s_ends) == 1:
+            s_end = s_ends[0]
+            end_prefix = f"{sp} SESSION_END"
+            if s_end.fields.get("reason") != "quit":
+                failures.append(
+                    f"{end_prefix} reason: expected quit, "
+                    f"got {s_end.fields.get('reason')!r}"
+                )
+            msg_sent = _require_int(
+                s_end.fields, "messages_sent", failures, end_prefix
+            )
+            msg_recv = _require_int(
+                s_end.fields, "messages_received", failures, end_prefix
+            )
+            malformed = _require_int(
+                s_end.fields, "malformed_messages", failures, end_prefix
+            )
+            if msg_sent is not None and msg_sent != m:
+                failures.append(
+                    f"{end_prefix} messages_sent: expected {m}, got {msg_sent}"
+                )
+            if msg_recv is not None and msg_recv != m:
+                failures.append(
+                    f"{end_prefix} messages_received: expected {m}, got {msg_recv}"
+                )
+            if malformed is not None and malformed != 0:
+                failures.append(
+                    f"{end_prefix} malformed_messages: expected 0, got {malformed}"
+                )
+
+    # Process totals: any SESSION_END snapshot may hold the final values;
+    # require that at least one matches the expected N/0/N/0.
+    totals_ok = False
+    for end in _events_named(server_events, "SESSION_END"):
+        try:
+            accepted = int(end.fields["total_connections_accepted"])
+            spawn_fail = int(end.fields["total_spawn_failures"])
+            sessions_ok = int(end.fields["total_sessions_ok"])
+            sessions_failed = int(end.fields["total_sessions_failed"])
+        except (KeyError, ValueError):
+            continue
+        if (
+            accepted == n
+            and spawn_fail == 0
+            and sessions_ok == n
+            and sessions_failed == 0
+        ):
+            totals_ok = True
+            metrics["server_total_connections_accepted"] = accepted
+            metrics["server_total_spawn_failures"] = spawn_fail
+            metrics["server_total_sessions_ok"] = sessions_ok
+            metrics["server_total_sessions_failed"] = sessions_failed
+            break
+    if not totals_ok:
+        failures.append(
+            "server process totals: no SESSION_END snapshot with "
+            f"total_connections_accepted={n}, total_spawn_failures=0, "
+            f"total_sessions_ok={n}, total_sessions_failed=0"
+        )
+
+    active_values: list[int] = []
+    for ev in connects + disconnects:
+        raw = ev.fields.get("active_connections")
+        if raw is None or raw == "unknown":
+            continue
+        try:
+            active_values.append(int(raw))
+        except ValueError:
+            failures.append(
+                f"server {ev.event}: active_connections not an integer ({raw!r})"
+            )
+
+    if active_values:
+        peak = max(active_values)
+        metrics["peak_active_connections"] = peak
+        if peak < 1:
+            failures.append(
+                f"peak_active_connections: expected >= 1, got {peak}"
+            )
+        if 0 not in active_values:
+            failures.append(
+                "active_connections: expected at least one observed value of 0"
+            )
+    else:
+        failures.append(
+            "active_connections: no numeric CONNECT/DISCONNECT snapshots found"
+        )
+        metrics["peak_active_connections"] = 0
+
+    return failures, metrics
