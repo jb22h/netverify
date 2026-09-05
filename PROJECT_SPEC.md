@@ -1030,7 +1030,7 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 6 — Failure Injection`
+`Phase 7 — Stress and Performance Testing`
 
 Completed:
 
@@ -1134,11 +1134,44 @@ Completed:
 - TestResult with typed metrics; JSON numbers not strings
 - Verified: count 1/10/100, JSON, quoted parser, --count 0 → exit 2,
   connect_fail_no_server, --all --count 50 (+ JSON)
-- Intentionally excluded: pytest, parallel tests, malformed socket
-  scenario, tc/netem, timeout/reconnect, Redis, Java, Docker, DB
+- Intentionally excluded at Phase 5 close: pytest, parallel tests,
+  malformed socket scenario, tc/netem, timeout/reconnect,
+  Redis, Java, Docker, DB
+
+**Phase 6 — Failure Injection**
+- Two distinct injected failure/network-condition types
+
+  latency_injection (opt-in; not in ordinary --all):
+  - automation/netem.py (stdlib) controls tc/netem on lo
+  - configured delay 100 ms; tc qdisc add (never replace)
+  - refuses unsafe/custom existing qdiscs
+  - privileged ops via non-interactive sudo -n
+  - baseline then injected run; injection_count capped at 10
+  - deterministic RTT-delta assertion
+  - finally deletes qdisc only if this run installed it
+  - cleanup verified by re-reading qdisc; cleanup_ok required
+  - Verified: count=3 and count=10 JSON; RTT delta ~200 ms;
+    lo returned to noqueue; missing sudo -n → exit 2, no change
+
+  server_crash_mid_session (unprivileged; in --all):
+  - CONNECT-log synchronization (no arbitrary sleep)
+  - SIGSTOP client; verify stopped via /proc/<pid>/status
+  - SIGKILL server while client active; SIGCONT client
+  - client exits nonzero with non-bye SESSION_END
+  - server SESSION_END/DISCONNECT not required after SIGKILL
+  - all processes reaped; cleanup_ok verified
+  - Verified: human + JSON PASS; no orphan net_server/net_client
+
+- Runner tests: basic_ping_pong, connect_fail_no_server,
+  latency_injection, server_crash_mid_session
+- --all remains non-privileged:
+  basic_ping_pong, connect_fail_no_server, server_crash_mid_session
+- JSON and exit semantics preserved; Phase 5 tests still pass
+- Deferred: packet loss (blocking client can wait forever without
+  socket timeouts), jitter/reorder/duplication, timeout/reconnect
 
 Next:
-- Begin Phase 6 — Failure Injection
+- Begin Phase 7 — Stress and Performance Testing
 
 Last updated:
 2026-09-05

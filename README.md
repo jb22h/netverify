@@ -10,8 +10,9 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 3** — Multiple Clients and Concurrency: complete
 - **Phase 4** — Structured Logging and Metrics: complete
 - **Phase 5** — Python Automation Layer: complete
+- **Phase 6** — Failure Injection: complete
 
-Phase 5 adds a stdlib Python runner under `automation/` that starts `net_server`, waits for LISTEN via `/proc/net/tcp` (without opening a TCP probe), runs `net_client`, parses Phase 4 structured logs, and asserts deterministic PASS/FAIL for `basic_ping_pong` and `connect_fail_no_server`, with `--json` output and no orphaned server processes.
+Phase 6 adds deterministic failure injection: opt-in `latency_injection` via `tc`/`netem` on loopback (100 ms delay, verified RTT increase, finally-protected and verified qdisc cleanup) and unprivileged `server_crash_mid_session` (CONNECT-synchronized SIGSTOP/SIGKILL/SIGCONT with full process reap). Ordinary `--all` stays non-privileged; packet loss remains deferred because the blocking client can wait indefinitely without socket timeouts.
 
 ## Directory Layout
 
@@ -20,7 +21,8 @@ netverify/
 ├── automation/
 │   ├── runner.py
 │   ├── logparse.py
-│   └── assertions.py
+│   ├── assertions.py
+│   └── netem.py
 ├── networking/
 │   ├── client/
 │   │   └── client.c
