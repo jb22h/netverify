@@ -358,3 +358,61 @@ def assert_connect_fail_no_server(
                 failures.append(f"{prefix} error_text: expected non-empty string")
 
     return failures, metrics
+
+
+def assert_latency_injection(
+    configured_delay_ms: int,
+    injection_count: int,
+    baseline_passed: bool,
+    injected_passed: bool,
+    baseline_failures: list[str],
+    injected_failures: list[str],
+    baseline_rtt_avg_us: int | None,
+    injected_rtt_avg_us: int | None,
+    cleanup_ok: bool,
+) -> list[str]:
+    """Assert latency_injection RTT delta and cleanup. Does not run tc or print."""
+    failures: list[str] = []
+
+    if not baseline_passed:
+        failures.append("baseline workload failed")
+        for item in baseline_failures:
+            failures.append(f"baseline: {item}")
+        return failures
+
+    if baseline_rtt_avg_us is None:
+        failures.append("baseline_rtt_avg_us missing")
+        return failures
+
+    if not injected_passed:
+        failures.append("injected workload failed")
+        for item in injected_failures:
+            failures.append(f"injected: {item}")
+
+    if injected_rtt_avg_us is None:
+        failures.append("injected_rtt_avg_us missing")
+    elif injected_passed:
+        min_expected = baseline_rtt_avg_us + int(1.5 * configured_delay_ms * 1000)
+        if injected_rtt_avg_us < min_expected:
+            failures.append(
+                "injected_rtt_avg_us "
+                f"{injected_rtt_avg_us} < baseline {baseline_rtt_avg_us} "
+                f"+ 1.5*{configured_delay_ms}ms "
+                f"(need >= {min_expected})"
+            )
+        # Broad sanity upper bound: reject absurd runaway values.
+        max_sane = baseline_rtt_avg_us + int(6.0 * configured_delay_ms * 1000)
+        if injected_rtt_avg_us > max_sane:
+            failures.append(
+                "injected_rtt_avg_us "
+                f"{injected_rtt_avg_us} exceeds sanity upper bound {max_sane} "
+                f"(baseline {baseline_rtt_avg_us}, delay {configured_delay_ms}ms)"
+            )
+
+    if not cleanup_ok:
+        failures.append("cleanup_ok is false: netem was not fully removed from lo")
+
+    if injection_count < 1:
+        failures.append(f"injection_count must be >= 1, got {injection_count}")
+
+    return failures

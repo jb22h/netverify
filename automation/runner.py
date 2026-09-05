@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NetVerify Phase 5 automation runner."""
+"""NetVerify automation runner (Phases 5–6)."""
 
 from __future__ import annotations
 
@@ -13,10 +13,26 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from assertions import assert_basic_ping_pong, assert_connect_fail_no_server
+import netem
+from assertions import (
+    assert_basic_ping_pong,
+    assert_connect_fail_no_server,
+    assert_latency_injection,
+)
 from logparse import parse_log_text
 
-VALID_TESTS = ("basic_ping_pong", "connect_fail_no_server")
+VALID_TESTS = (
+    "basic_ping_pong",
+    "connect_fail_no_server",
+    "latency_injection",
+)
+# Ordinary --all stays non-privileged (no latency_injection / sudo).
+ALL_TESTS = (
+    "basic_ping_pong",
+    "connect_fail_no_server",
+)
+
+LATENCY_DELAY_MS = 100
 
 
 @dataclass
@@ -158,6 +174,17 @@ def print_human(result: TestResult) -> None:
         print(f"messages: {result.metrics['requested_count']}")
     if "client_rtt_avg_us" in result.metrics:
         print(f"client_rtt_avg_us: {result.metrics['client_rtt_avg_us']}")
+    if result.name == "latency_injection":
+        for key in (
+            "configured_delay_ms",
+            "injection_count",
+            "baseline_rtt_avg_us",
+            "injected_rtt_avg_us",
+            "rtt_delta_us",
+            "cleanup_ok",
+        ):
+            if key in result.metrics:
+                print(f"{key}: {result.metrics[key]}")
     if "error_text" in result.metrics:
         print(f"error_text: {result.metrics['error_text']}")
     if "port" in result.metrics and result.name == "connect_fail_no_server":
@@ -189,7 +216,12 @@ def print_json_many(results: list[TestResult]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def run_basic_ping_pong(root: Path, count: int) -> TestResult:
+def run_basic_ping_pong(
+    root: Path,
+    count: int,
+    *,
+    client_timeout_s: float | None = None,
+) -> TestResult:
     name = "basic_ping_pong"
     started = time.monotonic()
 
@@ -231,7 +263,10 @@ def run_basic_ping_pong(root: Path, count: int) -> TestResult:
                 metrics={"port": port, "setup_error": True},
             )
 
-        client_timeout = max(30.0, float(count) * 0.1)
+        if client_timeout_s is None:
+            client_timeout = max(30.0, float(count) * 0.1)
+        else:
+            client_timeout = client_timeout_s
         try:
             completed = subprocess.run(
                 [
@@ -371,11 +406,182 @@ def run_connect_fail_no_server(root: Path) -> TestResult:
     )
 
 
+def run_latency_injection(root: Path, requested_count: int) -> TestResult:
+    name = "latency_injection"
+    started = time.monotonic()
+    delay_ms = LATENCY_DELAY_MS
+    injection_count = max(1, min(requested_count, 10))
+    metrics: dict[str, Any] = {
+        "configured_delay_ms": delay_ms,
+        "injection_count": injection_count,
+        "cleanup_ok": False,
+    }
+
+    if netem.find_tc() is None:
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=["tc not found on PATH; install iproute2"],
+            client_exit_code=None,
+            duration_s=time.monotonic() - started,
+            metrics={**metrics, "setup_error": True},
+        )
+
+    safe, detail = netem.qdisc_safe_for_install(netem.INTERFACE_LO)
+    if not safe:
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=[detail],
+            client_exit_code=None,
+            duration_s=time.monotonic() - started,
+            metrics={**metrics, "setup_error": True},
+        )
+
+    # Baseline without netem.
+    # Per-exchange budget: ~2*delay for injected run; baseline is fast.
+    baseline_timeout = max(30.0, float(injection_count) * 2.0)
+    baseline = run_basic_ping_pong(
+        root, injection_count, client_timeout_s=baseline_timeout
+    )
+    metrics["baseline_client_exit_code"] = baseline.client_exit_code
+    metrics["baseline_port"] = baseline.metrics.get("port")
+    baseline_rtt = baseline.metrics.get("client_rtt_avg_us")
+    if isinstance(baseline_rtt, int):
+        metrics["baseline_rtt_avg_us"] = baseline_rtt
+
+    if baseline.metrics.get("setup_error"):
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=[f"baseline setup error: {'; '.join(baseline.failures)}"],
+            client_exit_code=baseline.client_exit_code,
+            duration_s=time.monotonic() - started,
+            metrics={**metrics, "setup_error": True},
+        )
+
+    if not baseline.passed:
+        failures = assert_latency_injection(
+            delay_ms,
+            injection_count,
+            False,
+            False,
+            baseline.failures,
+            [],
+            metrics.get("baseline_rtt_avg_us"),
+            None,
+            True,  # no netem installed yet
+        )
+        metrics["cleanup_ok"] = True
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=failures,
+            client_exit_code=baseline.client_exit_code,
+            duration_s=time.monotonic() - started,
+            metrics=metrics,
+        )
+
+    installed = False
+    injected: TestResult | None = None
+    cleanup_ok = False
+
+    try:
+        ok, add_detail = netem.add_delay(netem.INTERFACE_LO, delay_ms)
+        if not ok:
+            return TestResult(
+                name=name,
+                passed=False,
+                failures=[add_detail],
+                client_exit_code=baseline.client_exit_code,
+                duration_s=time.monotonic() - started,
+                metrics={**metrics, "setup_error": True, "cleanup_ok": True},
+            )
+        installed = True
+
+        # ~2 * delay_ms RTT per exchange + slack; keep bounded.
+        per_exchange_s = (2.0 * delay_ms / 1000.0) * 3.0
+        injected_timeout = max(30.0, float(injection_count) * per_exchange_s + 10.0)
+        injected = run_basic_ping_pong(
+            root, injection_count, client_timeout_s=injected_timeout
+        )
+    finally:
+        if installed:
+            del_ok, del_detail = netem.remove_delay(netem.INTERFACE_LO)
+            clean_ok, clean_detail = netem.verify_clean(netem.INTERFACE_LO)
+            cleanup_ok = bool(del_ok and clean_ok)
+            metrics["cleanup_ok"] = cleanup_ok
+            if not del_ok:
+                metrics["cleanup_delete_error"] = del_detail
+            if not clean_ok:
+                metrics["cleanup_verify_error"] = clean_detail
+        else:
+            metrics["cleanup_ok"] = True
+            cleanup_ok = True
+
+    if injected is None:
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=["injected workload did not run"],
+            client_exit_code=baseline.client_exit_code,
+            duration_s=time.monotonic() - started,
+            metrics=metrics,
+        )
+
+    metrics["injected_client_exit_code"] = injected.client_exit_code
+    metrics["injected_port"] = injected.metrics.get("port")
+    injected_rtt = injected.metrics.get("client_rtt_avg_us")
+    if isinstance(injected_rtt, int):
+        metrics["injected_rtt_avg_us"] = injected_rtt
+
+    if (
+        isinstance(metrics.get("baseline_rtt_avg_us"), int)
+        and isinstance(metrics.get("injected_rtt_avg_us"), int)
+    ):
+        metrics["rtt_delta_us"] = (
+            metrics["injected_rtt_avg_us"] - metrics["baseline_rtt_avg_us"]
+        )
+
+    if injected.metrics.get("setup_error"):
+        return TestResult(
+            name=name,
+            passed=False,
+            failures=[f"injected setup error: {'; '.join(injected.failures)}"],
+            client_exit_code=injected.client_exit_code,
+            duration_s=time.monotonic() - started,
+            metrics={**metrics, "setup_error": True},
+        )
+
+    failures = assert_latency_injection(
+        delay_ms,
+        injection_count,
+        baseline.passed,
+        injected.passed,
+        baseline.failures,
+        injected.failures,
+        metrics.get("baseline_rtt_avg_us"),
+        metrics.get("injected_rtt_avg_us"),
+        cleanup_ok,
+    )
+
+    return TestResult(
+        name=name,
+        passed=len(failures) == 0,
+        failures=failures,
+        client_exit_code=injected.client_exit_code,
+        duration_s=time.monotonic() - started,
+        metrics=metrics,
+    )
+
+
 def run_named_test(root: Path, name: str, count: int) -> TestResult:
     if name == "basic_ping_pong":
         return run_basic_ping_pong(root, count)
     if name == "connect_fail_no_server":
         return run_connect_fail_no_server(root)
+    if name == "latency_injection":
+        return run_latency_injection(root, count)
     return TestResult(
         name=name,
         passed=False,
@@ -388,13 +594,13 @@ def run_named_test(root: Path, name: str, count: int) -> TestResult:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="NetVerify Phase 5 automation runner"
+        description="NetVerify automation runner"
     )
     parser.add_argument(
         "--count",
         type=int,
         default=100,
-        help="PING/PONG count for basic_ping_pong (default: 100)",
+        help="PING/PONG count for basic_ping_pong / latency baseline (default: 100)",
     )
     parser.add_argument(
         "--json",
@@ -410,7 +616,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     group.add_argument(
         "--all",
         action="store_true",
-        help="run basic_ping_pong then connect_fail_no_server",
+        help="run non-privileged tests (excludes latency_injection)",
     )
     return parser.parse_args(argv)
 
@@ -424,14 +630,16 @@ def main(argv: list[str] | None = None) -> int:
     root = project_root()
 
     if args.all:
-        selected = list(VALID_TESTS)
+        selected = list(ALL_TESTS)
     elif args.test is not None:
         selected = [args.test]
     else:
         selected = ["basic_ping_pong"]
 
-    # Fatal setup: missing binaries required by the selected set.
-    if "basic_ping_pong" in selected:
+    needs_server = any(
+        t in ("basic_ping_pong", "latency_injection") for t in selected
+    )
+    if needs_server:
         binaries = resolve_binaries(root)
         if isinstance(binaries, str):
             print(f"error: {binaries}", file=sys.stderr)
