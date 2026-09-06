@@ -1,0 +1,6 @@
+server:
+  port: 8080
+
+netverify:
+  repo-root: ${NETVERIFY_REPO_ROOT:}
+  runner-timeout-seconds: 120
