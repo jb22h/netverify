@@ -11,8 +11,13 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 4** — Structured Logging and Metrics: complete
 - **Phase 5** — Python Automation Layer: complete
 - **Phase 6** — Failure Injection: complete
+- **Phase 7** — Stress and Performance Testing: complete
 
-Phase 6 adds deterministic failure injection: opt-in `latency_injection` via `tc`/`netem` on loopback (100 ms delay, verified RTT increase, finally-protected and verified qdisc cleanup) and unprivileged `server_crash_mid_session` (CONNECT-synchronized SIGSTOP/SIGKILL/SIGCONT with full process reap). Ordinary `--all` stays non-privileged; packet loss remains deferred because the blocking client can wait indefinitely without socket timeouts.
+**Current phase:** Phase 8 — Java Spring Boot Control Plane
+
+Phase 7 adds automated `concurrent_load`: one `net_server` and N concurrent real `net_client` processes (`subprocess.Popen`, stdlib only), with a shared monotonic load deadline, full process reap, and server logs via `TemporaryFile` (avoids stderr PIPE backpressure). Correctness under load is order-independent (exact session/message/process totals; `peak_active_connections` measured but not required to equal N). Aggregate throughput/bytes and RTT min/max/average-of-per-client-averages are reported metrics, not machine-specific PASS gates; `aggregate_bytes` is client-observed `bytes_sent + bytes_received` only. Observational `/proc` metrics (`server_vm_rss_kb`, `server_vm_hwm_kb`, `server_cpu_time_s`) are informational. The C server was measured as-is (`listen` backlog 10, detached pthread per client, byte-at-a-time `recv`) with no pre-measurement optimization.
+
+Ordinary `--all` is non-privileged and runs `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, and a fixed `concurrent_load` smoke of **10 × 100** (ignores global `--count`/`--clients` for that entry). `latency_injection` remains explicit opt-in (sudo). Larger loads use `--test concurrent_load --clients N --count M` (`--clients` 1..1000). Verified workloads include 100 × 1000 as a reproducible benchmark and 500/1000-client stretches; low peaks on short high-N runs are expected because sessions can finish before all clients overlap. Deferred: P95, absolute throughput SLOs, epoll/buffered-recv optimization, Java/Redis/Docker/DB/React/AWS.
 
 ## Directory Layout
 
@@ -70,6 +75,13 @@ Use two terminals from the project root.
 ```text
 Server: PING 1 … PING 100, then session metrics
 Client: PONG 1 … PONG 100, then RTT and session metrics
+```
+
+## Automation (examples)
+
+```bash
+python3 automation/runner.py --all
+python3 automation/runner.py --test concurrent_load --clients 100 --count 1000
 ```
 
 ## Clean

@@ -35,12 +35,15 @@ VALID_TESTS = (
     "concurrent_load",
 )
 # Ordinary --all stays non-privileged (no latency_injection / sudo).
-# concurrent_load is opt-in until verified; not in ALL_TESTS yet.
+# concurrent_load smoke in --all uses fixed 10×100 (not CLI --count/--clients).
 ALL_TESTS = (
     "basic_ping_pong",
     "connect_fail_no_server",
     "server_crash_mid_session",
+    "concurrent_load",
 )
+ALL_CONCURRENT_CLIENTS = 10
+ALL_CONCURRENT_COUNT = 100
 
 LATENCY_DELAY_MS = 100
 CLIENT_COUNT_MAX = 1000000
@@ -1278,7 +1281,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     group.add_argument(
         "--all",
         action="store_true",
-        help="run non-privileged tests (excludes latency_injection)",
+        help=(
+            "run non-privileged tests (excludes latency_injection; "
+            "concurrent_load smoke is fixed 10 clients x 100 messages)"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -1328,7 +1334,17 @@ def main(argv: list[str] | None = None) -> int:
     results: list[TestResult] = []
     for name in selected:
         try:
-            result = run_named_test(root, name, args.count, clients=args.clients)
+            if args.all and name == "concurrent_load":
+                result = run_named_test(
+                    root,
+                    name,
+                    ALL_CONCURRENT_COUNT,
+                    clients=ALL_CONCURRENT_CLIENTS,
+                )
+            else:
+                result = run_named_test(
+                    root, name, args.count, clients=args.clients
+                )
         except Exception as exc:  # noqa: BLE001
             result = TestResult(
                 name=name,

@@ -1030,7 +1030,7 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 7 — Stress and Performance Testing`
+`Phase 8 — Java Spring Boot Control Plane`
 
 Completed:
 
@@ -1164,17 +1164,80 @@ Completed:
 
 - Runner tests: basic_ping_pong, connect_fail_no_server,
   latency_injection, server_crash_mid_session
-- --all remains non-privileged:
+- --all (as of Phase 6 close) was non-privileged:
   basic_ping_pong, connect_fail_no_server, server_crash_mid_session
 - JSON and exit semantics preserved; Phase 5 tests still pass
 - Deferred: packet loss (blocking client can wait forever without
   socket timeouts), jitter/reorder/duplication, timeout/reconnect
 
+**Phase 7 — Stress and Performance Testing**
+- Automated concurrent_load scenario (Python stdlib only)
+- One net_server; N concurrent real net_client processes via
+  subprocess.Popen (no shell=True, no shell background jobs)
+- CLI: --clients (1..1000), --count = messages per client
+- One shared monotonic load deadline (bounded; concurrency-aware;
+  not proportional to clients × count as wall-clock timeout)
+- Every client and server process reaped (terminate → wait → kill)
+- Server stderr/stdout via TemporaryFile to avoid PIPE backpressure
+  under large structured logs
+- Order-independent deterministic correctness assertions:
+  exact N client sessions, M/M/0 messages, N CONNECT /
+  N SESSION_END / N DISCONNECT, process totals via any
+  SESSION_END snapshot (not last-line assumption)
+- peak_active_connections from CONNECT/DISCONNECT snapshots;
+  peak >= 1 and active_connections returns to 0 required;
+  peak == N is NOT required (sessions may complete before
+  all clients overlap)
+- Aggregate throughput and bytes measured and reported;
+  not used as machine-specific PASS gates
+- aggregate_bytes = sum of client-observed bytes_sent +
+  bytes_received only (no double-counting with server)
+- RTT: rtt_min_us, rtt_max_us, rtt_avg_of_avgs_us
+  (average of per-client averages; not a global mean or P95)
+- Observational Linux /proc metrics (informational only):
+  server_vm_rss_kb, server_vm_hwm_kb, server_cpu_time_s
+  (process CPU time from utime+stime / CLK_TCK; not % utilization)
+- Server measured as-is (no pre-measurement optimization):
+  listen backlog 10, detached pthread per client,
+  recv one byte at a time
+- Ordinary --all is non-privileged and includes:
+  basic_ping_pong, connect_fail_no_server,
+  server_crash_mid_session, concurrent_load smoke 10 × 100
+  (fixed; ignores global --count/--clients for that entry)
+- latency_injection remains explicit opt-in (sudo)
+- JSON and exit semantics preserved; Phase 5/6 tests still pass
+
+  Verified workloads (this environment; not universal guarantees):
+  - 3 × 10: PASS, 3/3 clients, 30/30 messages, peak=3
+  - 10 × 100: PASS, 10/10 clients, 1000 messages; regression
+    observed peak=8
+  - 10 × 1000: PASS, 10/10, 10000/10000 messages;
+    duration ≈ 0.0565 s; ≈ 176978 msg/s; peak=10;
+    server_cpu_time_s=0.12; server_vm_hwm_kb=2240
+  - 100 × 1000 reproducible benchmark: PASS, 100/100,
+    100000/100000 messages, zero client/server spawn/session
+    failures; one JSON run: duration_s=0.356930847,
+    aggregate_messages_per_s=280166.315,
+    aggregate_bytes_per_s=4985559.57, peak=90,
+    server_cpu_time_s=1.15, server_vm_hwm_kb=2876;
+    later regression also PASS with peak=97
+  - 500 × 100: PASS, 500/500, 50000/50000, peak=12, no failures
+  - 1000 × 10: PASS, 1000/1000, 10000/10000, peak=4,
+    no client/server failures, no orphan processes
+  Low peaks on short high-N loads are expected: sessions finish
+  before all requested clients are simultaneously active.
+  Environment checked on the verification machine (open files
+  10240, process/user limit 63315); not claimed portable.
+
+- Deferred: P95 without raw RTT samples; absolute throughput SLOs;
+  server optimization / epoll; buffered recv refactor;
+  Java / Redis / Docker / DB / React / AWS
+
 Next:
-- Begin Phase 7 — Stress and Performance Testing
+- Begin Phase 8 — Java Spring Boot Control Plane
 
 Last updated:
-2026-09-05
+2026-09-06
 
 ---
 
