@@ -4,3 +4,4 @@ server:
 netverify:
   repo-root: ${NETVERIFY_REPO_ROOT:}
   runner-timeout-seconds: 120
+  python-command: python3

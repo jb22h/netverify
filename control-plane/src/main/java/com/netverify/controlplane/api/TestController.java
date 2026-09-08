@@ -1,7 +1,11 @@
 package com.netverify.controlplane.api;
 
 import com.netverify.controlplane.api.dto.CreateTestRequest;
+import com.netverify.controlplane.api.dto.RunAcceptedResponse;
+import com.netverify.controlplane.api.dto.TestLogsResponse;
+import com.netverify.controlplane.api.dto.TestMetricsResponse;
 import com.netverify.controlplane.api.dto.TestResponse;
+import com.netverify.controlplane.api.dto.TestResultResponse;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.service.TestService;
 import jakarta.validation.Valid;
@@ -40,5 +44,27 @@ public class TestController {
     @GetMapping("/{id}")
     public TestResponse get(@PathVariable UUID id) {
         return TestResponse.from(testService.getTest(id));
+    }
+
+    @PostMapping("/{id}/run")
+    public ResponseEntity<RunAcceptedResponse> run(@PathVariable UUID id) {
+        TestService.QueuedRun queued = testService.runTest(id);
+        return ResponseEntity.accepted()
+                .body(RunAcceptedResponse.queued(queued.id(), queued.queuedAt()));
+    }
+
+    @GetMapping("/{id}/results")
+    public TestResultResponse results(@PathVariable UUID id) {
+        return TestResultResponse.from(testService.getTerminalTest(id));
+    }
+
+    @GetMapping("/{id}/logs")
+    public TestLogsResponse logs(@PathVariable UUID id) {
+        return TestLogsResponse.from(testService.getTerminalTest(id));
+    }
+
+    @GetMapping("/{id}/metrics")
+    public TestMetricsResponse metrics(@PathVariable UUID id) {
+        return TestMetricsResponse.from(testService.getTerminalTest(id));
     }
 }

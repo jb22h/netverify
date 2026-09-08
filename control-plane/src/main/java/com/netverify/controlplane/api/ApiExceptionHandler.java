@@ -2,6 +2,8 @@ package com.netverify.controlplane.api;
 
 import com.netverify.controlplane.api.dto.ErrorResponse;
 import com.netverify.controlplane.service.BadRequestException;
+import com.netverify.controlplane.service.ConflictException;
+import com.netverify.controlplane.service.ExecutorSaturatedException;
 import com.netverify.controlplane.service.NotFoundException;
 import java.util.List;
 import org.springframework.http.HttpStatus;
@@ -10,6 +12,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -19,35 +22,50 @@ public class ApiExceptionHandler {
         List<String> details = ex.getBindingResult().getFieldErrors().stream()
                 .map(ApiExceptionHandler::formatFieldError)
                 .toList();
-        ErrorResponse body = new ErrorResponse(
-                HttpStatus.BAD_REQUEST.value(),
-                "Bad Request",
-                "validation failed",
-                details
+        return error(HttpStatus.BAD_REQUEST, "validation failed", details);
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        return error(
+                HttpStatus.BAD_REQUEST,
+                "invalid value for parameter " + ex.getName(),
+                List.of()
         );
-        return ResponseEntity.badRequest().body(body);
     }
 
     @ExceptionHandler(BadRequestException.class)
     public ResponseEntity<ErrorResponse> handleBadRequest(BadRequestException ex) {
-        ErrorResponse body = new ErrorResponse(
-                HttpStatus.BAD_REQUEST.value(),
-                "Bad Request",
-                ex.getMessage(),
-                List.of()
-        );
-        return ResponseEntity.badRequest().body(body);
+        return error(HttpStatus.BAD_REQUEST, ex.getMessage(), List.of());
     }
 
     @ExceptionHandler(NotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(NotFoundException ex) {
+        return error(HttpStatus.NOT_FOUND, ex.getMessage(), List.of());
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ErrorResponse> handleConflict(ConflictException ex) {
+        return error(HttpStatus.CONFLICT, ex.getMessage(), List.of());
+    }
+
+    @ExceptionHandler(ExecutorSaturatedException.class)
+    public ResponseEntity<ErrorResponse> handleSaturated(ExecutorSaturatedException ex) {
+        return error(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), List.of());
+    }
+
+    private static ResponseEntity<ErrorResponse> error(
+            HttpStatus status,
+            String message,
+            List<String> details
+    ) {
         ErrorResponse body = new ErrorResponse(
-                HttpStatus.NOT_FOUND.value(),
-                "Not Found",
-                ex.getMessage(),
-                List.of()
+                status.value(),
+                status.getReasonPhrase(),
+                message,
+                details
         );
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
+        return ResponseEntity.status(status).body(body);
     }
 
     private static String formatFieldError(FieldError error) {

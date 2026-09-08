@@ -12,8 +12,11 @@ public class NetVerifyProperties {
      */
     private String repoRoot = "";
 
-    /** Wall-clock timeout for a single Python runner process (Milestone 2). */
+    /** Wall-clock timeout for a single Python runner process. */
     private int runnerTimeoutSeconds = 120;
+
+    /** Interpreter used to launch the automation runner. */
+    private String pythonCommand = "python3";
 
     public String getRepoRoot() {
         return repoRoot;
@@ -29,5 +32,13 @@ public class NetVerifyProperties {
 
     public void setRunnerTimeoutSeconds(int runnerTimeoutSeconds) {
         this.runnerTimeoutSeconds = runnerTimeoutSeconds;
+    }
+
+    public String getPythonCommand() {
+        return pythonCommand;
+    }
+
+    public void setPythonCommand(String pythonCommand) {
+        this.pythonCommand = pythonCommand;
     }
 }
