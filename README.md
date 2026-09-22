@@ -12,12 +12,13 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 5** — Python Automation Layer: complete
 - **Phase 6** — Failure Injection: complete
 - **Phase 7** — Stress and Performance Testing: complete
+- **Phase 8** — Java Spring Boot Control Plane: complete
 
-**Current phase:** Phase 8 — Java Spring Boot Control Plane
+**Current phase:** Phase 9 — PostgreSQL Persistence
 
-Phase 7 adds automated `concurrent_load`: one `net_server` and N concurrent real `net_client` processes (`subprocess.Popen`, stdlib only), with a shared monotonic load deadline, full process reap, and server logs via `TemporaryFile` (avoids stderr PIPE backpressure). Correctness under load is order-independent (exact session/message/process totals; `peak_active_connections` measured but not required to equal N). Aggregate throughput/bytes and RTT min/max/average-of-per-client-averages are reported metrics, not machine-specific PASS gates; `aggregate_bytes` is client-observed `bytes_sent + bytes_received` only. Observational `/proc` metrics (`server_vm_rss_kb`, `server_vm_hwm_kb`, `server_cpu_time_s`) are informational. The C server was measured as-is (`listen` backlog 10, detached pthread per client, byte-at-a-time `recv`) with no pre-measurement optimization.
+Phase 8 adds a Java 21 / Maven / Spring Boot control plane under `control-plane/`. Tests are created and started over HTTP; a bounded Java executor launches `automation/runner.py --json` via `ProcessBuilder`, which drives the existing C `net_server` / `net_client`. Persistence is in-memory only (latest state/result per test; no durable history). Redis, PostgreSQL, Docker, React, AWS, and distributed workers are not part of Phase 8.
 
-Ordinary `--all` is non-privileged and runs `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, and a fixed `concurrent_load` smoke of **10 × 100** (ignores global `--count`/`--clients` for that entry). `latency_injection` remains explicit opt-in (sudo). Larger loads use `--test concurrent_load --clients N --count M` (`--clients` 1..1000). Verified workloads include 100 × 1000 as a reproducible benchmark and 500/1000-client stretches; low peaks on short high-N runs are expected because sessions can finish before all clients overlap. Deferred: P95, absolute throughput SLOs, epoll/buffered-recv optimization, Java/Redis/Docker/DB/React/AWS.
+HTTP scenarios: `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, `concurrent_load`. `latency_injection` is intentionally not exposed (requires privileged `tc`/`netem`).
 
 ## Directory Layout
 
@@ -28,6 +29,9 @@ netverify/
 │   ├── logparse.py
 │   ├── assertions.py
 │   └── netem.py
+├── control-plane/
+│   ├── pom.xml
+│   └── src/
 ├── networking/
 │   ├── client/
 │   │   └── client.c
@@ -45,6 +49,9 @@ See [PROJECT_SPEC.md](PROJECT_SPEC.md) for the full roadmap.
 - Linux (WSL2 / Ubuntu)
 - GCC
 - GNU Make
+- Python 3
+- Java 21
+- Maven
 
 ## Build
 
@@ -54,7 +61,7 @@ make
 
 This produces `net_server` and `net_client`.
 
-## Run
+## Run (C client/server)
 
 Use two terminals from the project root.
 
@@ -82,6 +89,40 @@ Client: PONG 1 … PONG 100, then RTT and session metrics
 ```bash
 python3 automation/runner.py --all
 python3 automation/runner.py --test concurrent_load --clients 100 --count 1000
+```
+
+## Control Plane (Phase 8)
+
+Build the C binaries first, then point the control plane at the repo root and start Spring Boot:
+
+```bash
+make
+export NETVERIFY_REPO_ROOT="$PWD"
+cd control-plane
+mvn spring-boot:run
+```
+
+Optional config (defaults shown): `netverify.runner-timeout-seconds=120`, `netverify.python-command=python3`. `NETVERIFY_REPO_ROOT` overrides `netverify.repo-root`.
+
+Endpoints: `POST/GET /api/tests`, `GET /api/tests/{id}`, `POST /api/tests/{id}/run`, `GET /api/tests/{id}/results|logs|metrics`.
+
+Minimal curl flow (server on port 8080):
+
+```bash
+# Create
+curl -s -X POST http://localhost:8080/api/tests \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"demo","scenario":"basic_ping_pong","count":10}'
+# → note the returned "id"
+
+# Queue a run
+curl -s -X POST http://localhost:8080/api/tests/<id>/run
+
+# Poll status, then read terminal output
+curl -s http://localhost:8080/api/tests/<id>
+curl -s http://localhost:8080/api/tests/<id>/results
+curl -s http://localhost:8080/api/tests/<id>/metrics
+curl -s http://localhost:8080/api/tests/<id>/logs
 ```
 
 ## Clean

@@ -561,7 +561,16 @@ Definition of Done:
 ## Phase 8 — Java Spring Boot Control Plane
 Goal: Turn the test framework into a software platform.
 
-Initial endpoints:
+**Status: COMPLETE**
+
+What exists under `control-plane/` (Java 21 + Maven + Spring Boot):
+- In-memory persistence only (latest state/result per test; no durable history)
+- REST API that creates tests and starts runs asynchronously
+- Bounded Java executor + `ProcessBuilder` launching `automation/runner.py --json`
+- Existing C `net_server` / `net_client` driven by the Python runner
+- No Redis, PostgreSQL, Docker, React, AWS, or distributed workers yet
+
+HTTP endpoints:
 ```text
 POST /api/tests
 GET  /api/tests
@@ -572,25 +581,37 @@ GET  /api/tests/{id}/logs
 GET  /api/tests/{id}/metrics
 ```
 
-Example request:
+Example create request:
 ```json
 {
-  "name": "TCP packet loss test",
-  "clients": 100,
-  "durationSeconds": 30,
-  "packetLossPercent": 10
+  "name": "demo",
+  "scenario": "basic_ping_pong",
+  "count": 10
 }
 ```
 
-Backend responsibilities:
-- validate input
-- create test configuration
-- create test run
-- trigger runner
-- track test status
-- return result
+HTTP-allowed scenarios (non-privileged):
+- `basic_ping_pong`
+- `connect_fail_no_server`
+- `server_crash_mid_session`
+- `concurrent_load`
 
-Initial statuses:
+`latency_injection` is intentionally **not** exposed through HTTP because it
+requires privileged `tc`/`netem` operations (still available via the Python CLI
+with sudo).
+
+Execution flow:
+```text
+HTTP request
+  -> Spring Boot control plane
+  -> bounded Java executor
+  -> ProcessBuilder
+  -> automation/runner.py --json
+  -> existing C server/client
+  -> parsed PASS/FAIL result
+```
+
+Lifecycle statuses:
 - CREATED
 - QUEUED
 - RUNNING
@@ -598,12 +619,33 @@ Initial statuses:
 - FAILED
 - CANCELLED
 
+Failure categories:
+- VERIFICATION
+- SETUP
+- LAUNCH
+- TIMEOUT
+- PARSE
+
+Configuration:
+- `NETVERIFY_REPO_ROOT` (overrides `netverify.repo-root`)
+- `netverify.runner-timeout-seconds` (default 120)
+- `netverify.python-command` (default `python3`)
+
+Backend responsibilities implemented:
+- validate input (whitelist scenarios; reject privileged ones)
+- create test configuration in memory
+- queue and track async runs
+- launch the Python runner safely (timeout + process-tree cleanup)
+- return status, results, logs, and metrics
+
 Definition of Done:
-- A test can be created and started through an HTTP API.
+- ✅ A test can be created and started through an HTTP API.
+
+Durable persistence and run history belong to Phase 9.
 
 ---
 
-## Phase 9 — PostgreSQL
+## Phase 9 — PostgreSQL Persistence
 Goal: Persist tests and results.
 
 Tasks:
@@ -959,7 +1001,7 @@ Short version:
 
 Longer version:
 
-> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs, persistent results, and later distributed workers. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
+> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs and in-memory results today; PostgreSQL durable persistence is next, and distributed workers come later. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
 
 ---
 
@@ -1008,7 +1050,7 @@ I am building a portfolio project called NetVerify.
 
 Read PROJECT_SPEC.md before doing anything.
 
-NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, Java/Spring Boot for the control plane, PostgreSQL for persistence, Redis later for distributed jobs, and React/TypeScript later for the dashboard.
+NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (in-memory results today). PostgreSQL durable persistence, Redis for distributed jobs, and a React/TypeScript dashboard come later.
 
 This is an educational Software Engineering project. Do not build the whole project for me. Work one milestone at a time, explain architectural decisions, and make sure I can understand and explain the code in an interview.
 
@@ -1030,7 +1072,7 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 8 — Java Spring Boot Control Plane`
+`Phase 9 — PostgreSQL Persistence`
 
 Completed:
 
@@ -1231,13 +1273,41 @@ Completed:
 
 - Deferred: P95 without raw RTT samples; absolute throughput SLOs;
   server optimization / epoll; buffered recv refactor;
-  Java / Redis / Docker / DB / React / AWS
+  Redis / Docker / DB / React / AWS
+
+**Phase 8 — Java Spring Boot Control Plane**
+- Java 21 + Maven + Spring Boot module under control-plane/
+- In-memory ConcurrentHashMap store only (latest state/result;
+  no durable history; restart loses all tests)
+- REST endpoints: POST/GET /api/tests, GET /api/tests/{id},
+  POST /api/tests/{id}/run, GET /api/tests/{id}/results|logs|metrics
+- HTTP-allowed scenarios: basic_ping_pong, connect_fail_no_server,
+  server_crash_mid_session, concurrent_load
+- latency_injection intentionally excluded from HTTP (privileged
+  tc/netem); still runnable via Python CLI with sudo
+- Async execution: HTTP → bounded ThreadPoolExecutor → ProcessBuilder
+  → automation/runner.py --json → C net_server/net_client →
+  parsed PASS/FAIL (RunnerResultDto mirrors runner JSON)
+- Lifecycle: CREATED, QUEUED, RUNNING, PASSED, FAILED, CANCELLED
+- Failure categories: VERIFICATION, SETUP, LAUNCH, TIMEOUT, PARSE
+- Config: NETVERIFY_REPO_ROOT / netverify.repo-root,
+  netverify.runner-timeout-seconds (default 120),
+  netverify.python-command (default python3)
+- Process safety: stdout/stderr capture to temp files, wall-clock
+  timeout, descendant ProcessHandle cleanup (graceful then forcible)
+- Validation + consistent JSON errors (400/404/409/503)
+- Unit and Spring WebMvc integration tests; optional real-runner
+  integration test when NETVERIFY_REPO_ROOT is set
+- Definition of Done met: a test can be created and started through
+  an HTTP API
+- Deferred to later phases: PostgreSQL persistence/history (Phase 9),
+  Redis/distributed workers, Docker, React, AWS
 
 Next:
-- Begin Phase 8 — Java Spring Boot Control Plane
+- Begin Phase 9 — PostgreSQL Persistence
 
 Last updated:
-2026-09-06
+2026-09-22
 
 ---
 
