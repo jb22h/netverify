@@ -11,7 +11,9 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -33,6 +35,22 @@ public class PythonRunnerBridge {
 
     static final int MAX_CAPTURED_BYTES = 1024 * 1024;
     private static final long KILL_WAIT_SECONDS = 5;
+    /** Overall budget to discover and gracefully stop descendants after parent.destroy(). */
+    private static final long DESCENDANT_DRAIN_SECONDS = 2;
+    /** Park between rescans when at least one known descendant is still alive. */
+    private static final long RESCAN_SLICE_MILLIS = 50;
+    /**
+     * Park between rescans when no descendants are known yet. Must stay short: a
+     * long wait is a window where the parent can fork a child and then exit,
+     * leaving an orphan that {@code process.descendants()} can never show again.
+     */
+    private static final long EMPTY_RESCAN_SLICE_MILLIS = 1;
+    /**
+     * When the first snapshot is empty (interrupt/timeout during runner startup),
+     * observe briefly for the first child fork before SIGTERM on the parent.
+     * Caps how long a still-active parent may spawn before shutdown is requested.
+     */
+    private static final long STARTUP_OBSERVE_MILLIS = 200;
 
     private static final Logger log = LoggerFactory.getLogger(PythonRunnerBridge.class);
 
@@ -179,53 +197,62 @@ public class PythonRunnerBridge {
     /**
      * Terminates the runner and everything it spawned.
      *
-     * <p>Descendants are snapshotted before the parent is signalled, because the
-     * handle tree is unavailable once the parent is reaped. SIGKILL of the Python
-     * parent does not run its cleanup handlers, so net_server / net_client are
-     * terminated explicitly here too.
+     * <p>Strategy: snapshot descendants, request parent shutdown early (so the
+     * runner stops launching new work), then drain/re-snapshot descendants for a
+     * bounded window while the parent is still observable. Late forks that miss
+     * the first snapshot are caught on a subsequent scan. Forcible kill follows,
+     * then bounded waits. Never blocks indefinitely.
      *
-     * <p>Graceful destroy first, then a bounded wait on parent and descendants,
-     * then forcible destroy of whatever is still alive, then a final bounded
-     * wait. Every wait has a deadline: this method never blocks indefinitely.
-     *
-     * <p>Cleanup runs to completion even when the calling thread is interrupted.
-     * The interrupt flag is parked on entry and any interrupt absorbed during
-     * cleanup is remembered, because a set flag makes every bounded wait below
-     * throw immediately and would leave the process tree half-killed. The flag
-     * is restored once cleanup has finished.
+     * <p>Cleanup parks the caller's interrupt flag on entry and restores it in
+     * {@code finally}, because a set flag would abort every bounded wait and
+     * leave the tree half-killed.
      */
     private void terminate(Process process) {
         boolean interrupted = Thread.interrupted();
         try {
-            List<ProcessHandle> descendants = process.descendants().toList();
+            // Snapshot before signalling anything. If the tree is still empty
+            // (interrupt during startup), keep observing briefly — without
+            // signalling — so the first child is in {@code known} before the
+            // parent gets SIGTERM and can disappear.
+            Set<ProcessHandle> known = new LinkedHashSet<>(process.descendants().toList());
+            if (known.isEmpty()) {
+                interrupted |= observeStartupDescendants(process, known);
+            }
 
-            descendants.forEach(ProcessHandle::destroy);
+            // Request shutdown so the runner stops launching further work. The
+            // process tree remains discoverable until the parent is reaped.
             process.destroy();
+            destroyQuietly(known);
 
-            interrupted |= awaitExit(process, KILL_WAIT_SECONDS);
-            interrupted |= awaitAllExit(descendants, KILL_WAIT_SECONDS);
+            interrupted |= drainDescendants(process, known);
 
-            boolean forced = false;
-            for (ProcessHandle handle : descendants) {
+            for (ProcessHandle handle : known) {
                 if (handle.isAlive()) {
                     handle.destroyForcibly();
-                    forced = true;
                 }
             }
             if (process.isAlive()) {
                 process.destroyForcibly();
-                forced = true;
             }
 
-            if (forced) {
-                interrupted |= awaitExit(process, KILL_WAIT_SECONDS);
-                interrupted |= awaitAllExit(descendants, KILL_WAIT_SECONDS);
+            interrupted |= awaitExit(process, KILL_WAIT_SECONDS);
+            interrupted |= awaitAllExit(known, KILL_WAIT_SECONDS);
+
+            for (ProcessHandle handle : known) {
+                if (handle.isAlive()) {
+                    handle.destroyForcibly();
+                }
             }
+            if (process.isAlive()) {
+                process.destroyForcibly();
+            }
+            interrupted |= awaitExit(process, KILL_WAIT_SECONDS);
+            interrupted |= awaitAllExit(known, KILL_WAIT_SECONDS);
 
             if (process.isAlive()) {
                 log.warn("runner process {} still alive after forcible termination", process.pid());
             }
-            for (ProcessHandle handle : descendants) {
+            for (ProcessHandle handle : known) {
                 if (handle.isAlive()) {
                     log.warn("runner descendant {} still alive after forcible termination",
                             handle.pid());
@@ -234,6 +261,137 @@ public class PythonRunnerBridge {
         } finally {
             if (interrupted) {
                 Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * Bounded pre-shutdown watch for the first descendant when none were visible
+     * yet. Discovery only — no signals — so the later destroy() still means
+     * "request shutdown early" relative to forcible kill and final waits.
+     */
+    private static boolean observeStartupDescendants(Process process, Set<ProcessHandle> known) {
+        boolean interrupted = false;
+        long deadlineNanos =
+                System.nanoTime() + Duration.ofMillis(STARTUP_OBSERVE_MILLIS).toNanos();
+        long sliceNanos = Duration.ofMillis(EMPTY_RESCAN_SLICE_MILLIS).toNanos();
+        while (known.isEmpty() && process.isAlive() && System.nanoTime() < deadlineNanos) {
+            known.addAll(process.descendants().toList());
+            if (!known.isEmpty()) {
+                break;
+            }
+            long remaining = deadlineNanos - System.nanoTime();
+            if (remaining <= 0) {
+                break;
+            }
+            interrupted |= awaitAnyExitOrTimeout(
+                    known, process, Math.min(sliceNanos, remaining)
+            );
+        }
+        return interrupted;
+    }
+
+    /**
+     * After parent.destroy(), re-scan for late-forked descendants while the
+     * parent is still observable. Short empty-set slices avoid a window where
+     * the parent forks and exits unseen; one await must never consume the whole
+     * drain budget.
+     */
+    private static boolean drainDescendants(Process process, Set<ProcessHandle> known) {
+        boolean interrupted = false;
+        long deadlineNanos =
+                System.nanoTime() + Duration.ofSeconds(DESCENDANT_DRAIN_SECONDS).toNanos();
+        long liveSliceNanos = Duration.ofMillis(RESCAN_SLICE_MILLIS).toNanos();
+        long emptySliceNanos = Duration.ofMillis(EMPTY_RESCAN_SLICE_MILLIS).toNanos();
+
+        // Immediate post-destroy scan before any park (catches children already forked).
+        mergeAndDestroyDescendants(process, known);
+
+        while (System.nanoTime() < deadlineNanos) {
+            mergeAndDestroyDescendants(process, known);
+
+            if (!process.isAlive()) {
+                // Parent reaped: tree discovery is over. One last merge above may
+                // still have caught children observed just before exit.
+                break;
+            }
+
+            long remaining = deadlineNanos - System.nanoTime();
+            if (remaining <= 0) {
+                break;
+            }
+
+            boolean anyLive = false;
+            for (ProcessHandle handle : known) {
+                if (handle.isAlive()) {
+                    anyLive = true;
+                    break;
+                }
+            }
+            long slice = Math.min(anyLive ? liveSliceNanos : emptySliceNanos, remaining);
+            interrupted |= awaitAnyExitOrTimeout(known, process, slice);
+        }
+        return interrupted;
+    }
+
+    private static void mergeAndDestroyDescendants(Process process, Set<ProcessHandle> known) {
+        // Safe if the parent has already exited: descendants() is then empty.
+        for (ProcessHandle handle : process.descendants().toList()) {
+            if (known.add(handle)) {
+                handle.destroy();
+            } else if (handle.isAlive()) {
+                handle.destroy();
+            }
+        }
+    }
+
+    /**
+     * Parks for up to {@code nanos} waiting for any known descendant (or the
+     * parent) to exit. Returns when one exits, the parent dies, or the slice
+     * elapses — so the caller can re-scan for late forks.
+     */
+    private static boolean awaitAnyExitOrTimeout(
+            Set<ProcessHandle> known,
+            Process process,
+            long nanos
+    ) {
+        boolean interrupted = false;
+        long deadlineNanos = System.nanoTime() + nanos;
+        while (process.isAlive() && System.nanoTime() < deadlineNanos) {
+            long remaining = deadlineNanos - System.nanoTime();
+            if (remaining <= 0) {
+                break;
+            }
+            ProcessHandle live = null;
+            for (ProcessHandle handle : known) {
+                if (handle.isAlive()) {
+                    live = handle;
+                    break;
+                }
+            }
+            try {
+                if (live != null) {
+                    live.onExit().get(remaining, TimeUnit.NANOSECONDS);
+                    return interrupted;
+                }
+                // No known live descendants yet: brief parent wait, not a busy-spin.
+                process.waitFor(remaining, TimeUnit.NANOSECONDS);
+                return interrupted;
+            } catch (InterruptedException ex) {
+                interrupted = true;
+            } catch (ExecutionException | TimeoutException ex) {
+                return interrupted;
+            }
+        }
+        return interrupted;
+    }
+
+    private static void destroyQuietly(Set<ProcessHandle> handles) {
+        for (ProcessHandle handle : handles) {
+            try {
+                handle.destroy();
+            } catch (RuntimeException ignored) {
+                // Process may have already exited between snapshot and signal.
             }
         }
     }
@@ -268,7 +426,7 @@ public class PythonRunnerBridge {
      *
      * @return true if an interrupt was absorbed and must be restored later
      */
-    private static boolean awaitAllExit(List<ProcessHandle> handles, long seconds) {
+    private static boolean awaitAllExit(Set<ProcessHandle> handles, long seconds) {
         boolean interrupted = false;
         long deadlineNanos = System.nanoTime() + Duration.ofSeconds(seconds).toNanos();
         for (ProcessHandle handle : handles) {
