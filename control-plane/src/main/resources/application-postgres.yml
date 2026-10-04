@@ -1,0 +1,7 @@
+# Activated only with --spring.profiles.active=postgres
+# Credentials come from the environment; never commit real values.
+netverify:
+  db:
+    url: ${NETVERIFY_DB_URL:}
+    user: ${NETVERIFY_DB_USER:}
+    password: ${NETVERIFY_DB_PASSWORD:}
