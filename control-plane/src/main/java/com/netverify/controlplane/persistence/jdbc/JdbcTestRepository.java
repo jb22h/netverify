@@ -3,6 +3,7 @@ package com.netverify.controlplane.persistence.jdbc;
 import com.netverify.controlplane.persistence.TestEntity;
 import com.netverify.controlplane.persistence.TestRepository;
 import java.sql.Timestamp;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.context.annotation.Profile;
@@ -61,5 +62,17 @@ public class JdbcTestRepository implements TestRepository {
         } catch (EmptyResultDataAccessException ex) {
             return Optional.empty();
         }
+    }
+
+    @Override
+    public List<TestEntity> list() {
+        return List.copyOf(jdbcTemplate.query(
+                """
+                SELECT id, name, scenario, count, clients, created_at
+                FROM tests
+                ORDER BY created_at ASC, id::text ASC
+                """,
+                ROW_MAPPER
+        ));
     }
 }

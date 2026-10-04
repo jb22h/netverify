@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
@@ -16,6 +17,8 @@ import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
+import com.netverify.controlplane.persistence.InMemoryTestRepository;
+import com.netverify.controlplane.persistence.TestRepository;
 import com.netverify.controlplane.runner.PythonRunOutcome;
 import com.netverify.controlplane.runner.PythonRunnerBridge;
 import com.netverify.controlplane.runner.RunnerResultDto;
@@ -33,11 +36,13 @@ class TestServiceRunTest {
             "basic_ping_pong", true, List.of(), 0, 0.05, Map.of("requested_count", 3)
     );
 
+    private TestRepository testRepository;
     private InMemoryTestStore store;
     private PythonRunnerBridge bridge;
 
     @BeforeEach
     void setUp() {
+        testRepository = new InMemoryTestRepository();
         store = new InMemoryTestStore();
         bridge = mock(PythonRunnerBridge.class);
     }
@@ -195,7 +200,9 @@ class TestServiceRunTest {
 
         service.executeRun(id);
 
-        assertEquals(TestStatus.CREATED, store.get(id).orElseThrow().getStatus());
+        // Create does not install runtime; cold executeRun is a no-op.
+        assertTrue(store.get(id).isEmpty());
+        assertEquals(TestStatus.CREATED, service.getTest(id).getStatus());
         verifyNoInteractions(bridge);
     }
 
@@ -272,7 +279,7 @@ class TestServiceRunTest {
     }
 
     private TestService serviceWith(RunnerTaskExecutor executor) {
-        return new TestService(store, bridge, executor);
+        return new TestService(testRepository, store, bridge, executor);
     }
 
     private static UUID createTest(

@@ -6,6 +6,8 @@ import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
+import com.netverify.controlplane.persistence.TestEntity;
+import com.netverify.controlplane.persistence.TestRepository;
 import com.netverify.controlplane.runner.PythonRunOutcome;
 import com.netverify.controlplane.runner.PythonRunnerBridge;
 import com.netverify.controlplane.store.InMemoryTestStore;
@@ -13,6 +15,7 @@ import com.netverify.controlplane.store.QueueTransitionResult;
 import com.netverify.controlplane.store.TerminalUpdate;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
@@ -24,15 +27,18 @@ public class TestService {
 
     private static final Logger log = LoggerFactory.getLogger(TestService.class);
 
+    private final TestRepository testRepository;
     private final InMemoryTestStore store;
     private final PythonRunnerBridge runnerBridge;
     private final RunnerTaskExecutor executor;
 
     public TestService(
+            TestRepository testRepository,
             InMemoryTestStore store,
             PythonRunnerBridge runnerBridge,
             RunnerTaskExecutor executor
     ) {
+        this.testRepository = testRepository;
         this.store = store;
         this.runnerBridge = runnerBridge;
         this.executor = executor;
@@ -76,7 +82,7 @@ public class TestService {
 
         Integer clients = normalizeClients(scenario, request.getClients());
 
-        TestRecord record = new TestRecord(
+        TestEntity entity = new TestEntity(
                 UUID.randomUUID(),
                 name,
                 scenario,
@@ -84,20 +90,26 @@ public class TestService {
                 clients,
                 Instant.now()
         );
-        store.save(record);
-        return record;
+        testRepository.insert(entity);
+        // Definition-only create: no runtime row until /run.
+        return compose(entity, Optional.empty());
     }
 
     public List<TestRecord> listTests() {
-        return store.list();
+        return testRepository.list().stream()
+                .map(entity -> compose(entity, store.get(entity.id())))
+                .toList();
     }
 
     public TestRecord getTest(UUID id) {
-        return store.get(id)
-                .orElseThrow(() -> new NotFoundException("test not found: " + id));
+        TestEntity entity = requireDefinition(id);
+        return compose(entity, store.get(id));
     }
 
-    /** Returns the record only once it has a terminal result, else 404/409 semantics. */
+    /**
+     * Returns a composed view only once the in-memory run is terminal.
+     * Unknown definitions → 404; known but cold / non-terminal → 409.
+     */
     public TestRecord getTerminalTest(UUID id) {
         TestRecord record = getTest(id);
         if (!isTerminal(record.getStatus())) {
@@ -114,6 +126,9 @@ public class TestService {
      * @return the id/queue timestamp of the accepted run
      */
     public QueuedRun runTest(UUID id) {
+        TestEntity entity = requireDefinition(id);
+        store.ensurePresent(skeletonFrom(entity));
+
         QueueTransitionResult queued = store.tryQueueForRun(id);
         switch (queued) {
             case NOT_FOUND -> throw new NotFoundException("test not found: " + id);
@@ -151,11 +166,15 @@ public class TestService {
                 return;
             }
 
+            // Prefer durable definition fields over any stale copies on the runtime row.
+            TestEntity entity = testRepository.findById(id).orElse(null);
+            String scenario = entity != null ? entity.scenario() : record.getScenario();
+            int count = entity != null ? entity.count() : record.getCount();
+            Integer clients = entity != null ? entity.clients() : record.getClients();
+
             PythonRunOutcome outcome;
             try {
-                outcome = runnerBridge.run(
-                        record.getScenario(), record.getCount(), record.getClients()
-                );
+                outcome = runnerBridge.run(scenario, count, clients);
             } catch (RuntimeException ex) {
                 log.warn("runner bridge failed for test {}", id, ex);
                 outcome = PythonRunOutcome.preLaunchFailure(
@@ -174,6 +193,43 @@ public class TestService {
                     )
             );
         }
+    }
+
+    private TestEntity requireDefinition(UUID id) {
+        return testRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("test not found: " + id));
+    }
+
+    /**
+     * Definition fields always from {@link TestEntity}; mutable run fields from
+     * runtime when present, otherwise CREATED with null run metadata.
+     */
+    static TestRecord compose(TestEntity entity, Optional<TestRecord> runtime) {
+        TestRecord view = skeletonFrom(entity);
+        if (runtime.isEmpty()) {
+            return view;
+        }
+        TestRecord run = runtime.get();
+        view.setStatus(run.getStatus());
+        view.setStartedAt(run.getStartedAt());
+        view.setFinishedAt(run.getFinishedAt());
+        view.setExitCode(run.getExitCode());
+        view.setRunnerResult(run.getRunnerResult());
+        view.setStdout(run.getStdout());
+        view.setStderr(run.getStderr());
+        view.setFailureCategory(run.getFailureCategory());
+        return view;
+    }
+
+    static TestRecord skeletonFrom(TestEntity entity) {
+        return new TestRecord(
+                entity.id(),
+                entity.name(),
+                entity.scenario(),
+                entity.count(),
+                entity.clients(),
+                entity.createdAt()
+        );
     }
 
     private static TerminalUpdate toTerminalUpdate(PythonRunOutcome outcome) {

@@ -49,6 +49,17 @@ public class InMemoryTestStore {
         records.put(record.getId(), record);
     }
 
+    /**
+     * Installs a CREATED runtime skeleton only if this test id has no runtime row
+     * yet. Never overwrites an existing QUEUED, RUNNING, or terminal record.
+     *
+     * @return the pre-existing record, or {@code createdSkeleton} if inserted
+     */
+    public TestRecord ensurePresent(TestRecord createdSkeleton) {
+        TestRecord existing = records.putIfAbsent(createdSkeleton.getId(), createdSkeleton);
+        return existing != null ? existing : createdSkeleton;
+    }
+
     public Optional<TestRecord> get(UUID id) {
         return Optional.ofNullable(records.get(id));
     }

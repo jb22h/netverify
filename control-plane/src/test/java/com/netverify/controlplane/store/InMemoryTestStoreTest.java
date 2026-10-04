@@ -26,6 +26,20 @@ class InMemoryTestStoreTest {
     }
 
     @Test
+    void ensurePresentInsertsOnceAndNeverOverwrites() {
+        TestRecord first = newRecord();
+        assertEquals(first, store.ensurePresent(first));
+        first.setStatus(TestStatus.QUEUED);
+
+        TestRecord second = new TestRecord(
+                first.getId(), "other", "basic_ping_pong", 1, null, Instant.now()
+        );
+        TestRecord ensured = store.ensurePresent(second);
+        assertEquals(TestStatus.QUEUED, ensured.getStatus());
+        assertEquals("t", ensured.getName());
+    }
+
+    @Test
     void tryQueueFromCreatedSucceeds() {
         TestRecord record = newRecord();
         store.save(record);
