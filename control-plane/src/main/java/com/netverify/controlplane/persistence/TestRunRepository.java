@@ -4,6 +4,7 @@ import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestStatus;
 import com.netverify.controlplane.runner.RunnerResultDto;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -27,6 +28,13 @@ public interface TestRunRepository {
      * the native-UUID index alone.
      */
     Optional<TestRunEntity> findLatestByTestId(UUID testId);
+
+    /**
+     * All runs for a test, newest first:
+     * {@code ORDER BY queued_at DESC, id::text DESC}.
+     * Returned list is immutable.
+     */
+    List<TestRunEntity> findAllByTestId(UUID testId);
 
     /** @return rows updated (0 or 1) */
     int tryMarkRunning(UUID runId, Instant startedAt);

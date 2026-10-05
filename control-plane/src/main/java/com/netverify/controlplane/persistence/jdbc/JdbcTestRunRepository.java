@@ -9,6 +9,7 @@ import com.netverify.controlplane.persistence.TestRunRepository;
 import com.netverify.controlplane.runner.RunnerResultDto;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.context.annotation.Profile;
@@ -119,6 +120,23 @@ public class JdbcTestRunRepository implements TestRunRepository {
         } catch (EmptyResultDataAccessException ex) {
             return Optional.empty();
         }
+    }
+
+    @Override
+    public List<TestRunEntity> findAllByTestId(UUID testId) {
+        // id::text tie-break matches M2 canonical UUID-text ordering for semantic
+        // consistency; not claimed to be covered by the native-UUID index alone.
+        List<TestRunEntity> rows = jdbcTemplate.query(
+                """
+                SELECT %s
+                FROM test_runs
+                WHERE test_id = ?
+                ORDER BY queued_at DESC, id::text DESC
+                """.formatted(SELECT_COLUMNS),
+                rowMapper,
+                testId
+        );
+        return List.copyOf(rows);
     }
 
     @Override

@@ -4,13 +4,12 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * In-memory test record with immutable configuration and mutable runtime state.
+ * Composed API view: immutable definition fields plus mutable latest-run state.
  *
  * <p>Runtime fields require cross-thread visibility because HTTP threads read
- * while executor threads update them asynchronously.
- *
- * <p>Lifecycle state transitions must still be coordinated through
- * {@code InMemoryTestStore} atomic operations.
+ * while executor threads update them asynchronously. Authoritative run
+ * transitions live in {@code RunLifecycleStore}; this type is a composition
+ * projection, not a lifecycle store.
  *
  * <p>{@code volatile} provides visibility, not compound-operation atomicity.
  */

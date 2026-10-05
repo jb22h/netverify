@@ -2,6 +2,7 @@ package com.netverify.controlplane.api;
 
 import com.netverify.controlplane.api.dto.CreateTestRequest;
 import com.netverify.controlplane.api.dto.RunAcceptedResponse;
+import com.netverify.controlplane.api.dto.RunSummaryDto;
 import com.netverify.controlplane.api.dto.TestLogsResponse;
 import com.netverify.controlplane.api.dto.TestMetricsResponse;
 import com.netverify.controlplane.api.dto.TestResponse;
@@ -51,6 +52,15 @@ public class TestController {
         TestService.QueuedRun queued = testService.runTest(id);
         return ResponseEntity.accepted()
                 .body(RunAcceptedResponse.queued(queued.id(), queued.queuedAt()));
+    }
+
+    /**
+     * Newest-first run history. Entries expose the actual run UUID; {@code POST
+     * /run} remains backward-compatible and returns the test id.
+     */
+    @GetMapping("/{id}/runs")
+    public List<RunSummaryDto> runs(@PathVariable UUID id) {
+        return testService.listRuns(id);
     }
 
     @GetMapping("/{id}/results")

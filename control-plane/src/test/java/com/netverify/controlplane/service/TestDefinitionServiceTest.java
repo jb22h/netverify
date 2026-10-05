@@ -17,13 +17,13 @@ import com.netverify.controlplane.domain.TestStatus;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.InMemoryRunLifecycleStore;
 import com.netverify.controlplane.persistence.InMemoryTestRepository;
+import com.netverify.controlplane.persistence.QueueRunResult;
 import com.netverify.controlplane.persistence.RunSnapshot;
 import com.netverify.controlplane.persistence.TestEntity;
 import com.netverify.controlplane.persistence.TestRepository;
 import com.netverify.controlplane.runner.PythonRunOutcome;
 import com.netverify.controlplane.runner.PythonRunnerBridge;
 import com.netverify.controlplane.runner.RunnerResultDto;
-import com.netverify.controlplane.store.InMemoryTestStore;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -35,18 +35,18 @@ import org.junit.jupiter.api.Test;
 class TestDefinitionServiceTest {
 
     private TestRepository testRepository;
-    private InMemoryTestStore store;
+    private InMemoryRunLifecycleStore lifecycle;
     private PythonRunnerBridge bridge;
     private TestService service;
 
     @BeforeEach
     void setUp() {
         testRepository = new InMemoryTestRepository();
-        store = new InMemoryTestStore();
+        lifecycle = new InMemoryRunLifecycleStore();
         bridge = mock(PythonRunnerBridge.class);
         service = new TestService(
                 testRepository,
-                new InMemoryRunLifecycleStore(store),
+                lifecycle,
                 bridge,
                 new SynchronousExecutor()
         );
@@ -57,7 +57,8 @@ class TestDefinitionServiceTest {
         TestRecord created = create("a", "basic_ping_pong", 10, null);
 
         assertTrue(testRepository.findById(created.getId()).isPresent());
-        assertTrue(store.get(created.getId()).isEmpty());
+        assertTrue(lifecycle.findLatest(created.getId()).isEmpty());
+        assertEquals(List.of(), service.listRuns(created.getId()));
         assertEquals(TestStatus.CREATED, created.getStatus());
         assertNull(created.getStartedAt());
         assertNull(created.getFinishedAt());
@@ -73,7 +74,7 @@ class TestDefinitionServiceTest {
         assertEquals("solo", viewed.getName());
         assertNull(viewed.getStartedAt());
         assertNull(viewed.getExitCode());
-        assertTrue(store.get(created.getId()).isEmpty());
+        assertTrue(lifecycle.findLatest(created.getId()).isEmpty());
     }
 
     @Test
@@ -82,20 +83,22 @@ class TestDefinitionServiceTest {
         Instant t1 = Instant.parse("2026-01-01T00:00:01Z");
         UUID idEarly = UUID.fromString("00000000-0000-0000-0000-000000000001");
         UUID idLate = UUID.fromString("00000000-0000-0000-0000-000000000002");
+        TestEntity late = new TestEntity(idLate, "late", "basic_ping_pong", 2, null, t1);
         testRepository.insert(new TestEntity(idEarly, "early", "basic_ping_pong", 1, null, t0));
-        testRepository.insert(new TestEntity(idLate, "late", "basic_ping_pong", 2, null, t1));
+        testRepository.insert(late);
 
-        store.ensurePresent(new TestRecord(idLate, "stale-name", "basic_ping_pong", 2, null, t1));
-        store.get(idLate).orElseThrow().setStatus(TestStatus.RUNNING);
-        store.get(idLate).orElseThrow().setStartedAt(Instant.parse("2026-01-01T00:00:02Z"));
+        UUID runId = UUID.randomUUID();
+        Instant startedAt = Instant.parse("2026-01-01T00:00:02Z");
+        assertEquals(QueueRunResult.QUEUED, lifecycle.tryQueue(late, runId, t1));
+        assertTrue(lifecycle.tryStartRunning(idLate, runId, startedAt));
 
         List<TestRecord> listed = service.listTests();
 
         assertEquals(List.of(idEarly, idLate), listed.stream().map(TestRecord::getId).toList());
         assertEquals(TestStatus.CREATED, listed.get(0).getStatus());
         assertEquals(TestStatus.RUNNING, listed.get(1).getStatus());
-        assertEquals("late", listed.get(1).getName()); // definition SoT, not runtime copy
-        assertNotNull(listed.get(1).getStartedAt());
+        assertEquals("late", listed.get(1).getName()); // definition SoT
+        assertEquals(startedAt, listed.get(1).getStartedAt());
     }
 
     @Test
@@ -105,7 +108,7 @@ class TestDefinitionServiceTest {
                 id, "canonical", "basic_ping_pong", 7, null, Instant.now()
         );
         RunSnapshot staleRuntime = new RunSnapshot(
-                id,
+                UUID.randomUUID(),
                 TestStatus.PASSED,
                 Instant.EPOCH,
                 Instant.EPOCH,
@@ -130,7 +133,7 @@ class TestDefinitionServiceTest {
     @Test
     void runTestHydratesRepositoryOnlyDefinition() {
         TestRecord created = create("hydrate", "basic_ping_pong", 3, null);
-        assertTrue(store.get(created.getId()).isEmpty());
+        assertTrue(lifecycle.findLatest(created.getId()).isEmpty());
         when(bridge.run(any(), anyInt(), any())).thenReturn(
                 PythonRunOutcome.passed(
                         0,
@@ -144,16 +147,17 @@ class TestDefinitionServiceTest {
 
         service.runTest(created.getId());
 
-        assertEquals(TestStatus.PASSED, store.get(created.getId()).orElseThrow().getStatus());
+        assertEquals(TestStatus.PASSED, service.getTest(created.getId()).getStatus());
         verify(bridge).run("basic_ping_pong", 3, null);
     }
 
     @Test
-    void unknownDefinitionIs404ForGetAndTerminalAndRun() {
+    void unknownDefinitionIs404ForGetAndTerminalAndRunAndHistory() {
         UUID missing = UUID.randomUUID();
         assertThrows(NotFoundException.class, () -> service.getTest(missing));
         assertThrows(NotFoundException.class, () -> service.getTerminalTest(missing));
         assertThrows(NotFoundException.class, () -> service.runTest(missing));
+        assertThrows(NotFoundException.class, () -> service.listRuns(missing));
     }
 
     @Test
@@ -167,25 +171,21 @@ class TestDefinitionServiceTest {
     }
 
     @Test
-    void ensurePresentDoesNotOverwriteQueuedRuntime() {
-        TestRepository repo = new InMemoryTestRepository();
-        InMemoryTestStore runtime = new InMemoryTestStore();
+    void secondQueueWhileActiveConflictsWithoutLosingFirstRun() {
         TestService queuedService = new TestService(
-                repo,
-                new InMemoryRunLifecycleStore(runtime),
+                testRepository,
+                lifecycle,
                 bridge,
                 task -> { /* never run */ }
         );
         UUID id = createWith(queuedService, "q2", "basic_ping_pong", 3, null).getId();
         queuedService.runTest(id);
-        assertEquals(TestStatus.QUEUED, runtime.get(id).orElseThrow().getStatus());
+        assertEquals(TestStatus.QUEUED, queuedService.getTest(id).getStatus());
 
-        TestRecord other = new TestRecord(
-                id, "other", "basic_ping_pong", 3, null, Instant.now()
-        );
-        TestRecord ensured = runtime.ensurePresent(other);
-        assertEquals(TestStatus.QUEUED, ensured.getStatus());
-        assertEquals(TestStatus.QUEUED, runtime.get(id).orElseThrow().getStatus());
+        assertThrows(ConflictException.class, () -> queuedService.runTest(id));
+        assertEquals(1, queuedService.listRuns(id).size());
+        assertEquals(TestStatus.QUEUED, queuedService.listRuns(id).get(0).status());
+        assertNotNull(queuedService.listRuns(id).get(0).id());
     }
 
     private TestRecord create(String name, String scenario, int count, Integer clients) {

@@ -25,7 +25,6 @@ import com.netverify.controlplane.service.TestService;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
@@ -276,28 +275,20 @@ class RunLifecyclePersistenceIntegrationTest {
     void latestTieBreakUsesIdTextDesc() {
         TestEntity def = insertDefinition("tie");
         Instant same = Instant.now().truncatedTo(ChronoUnit.MILLIS);
-        UUID idLowText = UUID.randomUUID();
-        UUID idHighText = UUID.randomUUID();
-        while (idLowText.toString().compareTo(idHighText.toString()) >= 0) {
-            idLowText = UUID.randomUUID();
-            idHighText = UUID.randomUUID();
-        }
+        TieRunIds tie = freshTieRunIds();
 
         testRunRepository.insert(new TestRunEntity(
-                idLowText, def.id(), TestStatus.PASSED, same, same, same,
+                tie.low(), def.id(), TestStatus.PASSED, same, same, same,
                 0, null, "low", "", null
         ));
         testRunRepository.insert(new TestRunEntity(
-                idHighText, def.id(), TestStatus.PASSED, same, same, same,
+                tie.high(), def.id(), TestStatus.PASSED, same, same, same,
                 0, null, "high", "", null
         ));
 
         TestRunEntity latest = testRunRepository.findLatestByTestId(def.id()).orElseThrow();
         assertEquals("high", latest.stdout());
-        List<UUID> byTextDesc = List.of(idLowText, idHighText).stream()
-                .sorted(Comparator.comparing(UUID::toString).reversed())
-                .toList();
-        assertEquals(byTextDesc.get(0), latest.id());
+        assertEquals(tie.high(), latest.id());
     }
 
     @Test
@@ -419,12 +410,161 @@ class RunLifecyclePersistenceIntegrationTest {
         assertFalse(runIds.get(0).equals(runIds.get(1)));
     }
 
+    @Test
+    void findAllByTestIdAndListRunsEmptyThenNewestFirst() {
+        TestEntity def = insertDefinition("history");
+        JdbcRunLifecycleStore lifecycle = new JdbcRunLifecycleStore(testRunRepository);
+        assertEquals(List.of(), testRunRepository.findAllByTestId(def.id()));
+        assertEquals(List.of(), lifecycle.listRuns(def.id()));
+
+        Instant older = Instant.now().truncatedTo(ChronoUnit.MILLIS).minusSeconds(30);
+        Instant newer = older.plusSeconds(10);
+        UUID runOld = UUID.randomUUID();
+        UUID runNew = UUID.randomUUID();
+        insertCompleted(runOld, def.id(), older, "old");
+        insertCompleted(runNew, def.id(), newer, "new");
+
+        List<TestRunEntity> rows = testRunRepository.findAllByTestId(def.id());
+        assertEquals(List.of(runNew, runOld), rows.stream().map(TestRunEntity::id).toList());
+        assertEquals(
+                List.of(runNew, runOld),
+                lifecycle.listRuns(def.id()).stream().map(RunSnapshot::runId).toList()
+        );
+    }
+
+    @Test
+    void listRunsTieBreakUsesIdTextDesc() {
+        TestEntity def = insertDefinition("history-tie");
+        Instant same = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        TieRunIds tie = freshTieRunIds();
+        insertCompleted(tie.low(), def.id(), same, "low");
+        insertCompleted(tie.high(), def.id(), same, "high");
+
+        assertEquals(
+                List.of(tie.high(), tie.low()),
+                testRunRepository.findAllByTestId(def.id()).stream()
+                        .map(TestRunEntity::id)
+                        .toList()
+        );
+    }
+
+    @Test
+    void historySurvivesFreshServiceAndKeepsLatestOnlyDetails() {
+        TestEntity def = insertDefinition("history-fresh");
+        PythonRunnerBridge bridge = mock(PythonRunnerBridge.class);
+        when(bridge.run(any(), anyInt(), any()))
+                .thenReturn(PythonRunOutcome.passed(
+                        0,
+                        new RunnerResultDto("basic_ping_pong", true, List.of(), 0, 0.01, Map.of()),
+                        "first",
+                        ""
+                ))
+                .thenReturn(PythonRunOutcome.failed(
+                        FailureCategory.VERIFICATION,
+                        1,
+                        null,
+                        "second",
+                        "fail",
+                        "nope"
+                ));
+        TestService first = new TestService(
+                testRepository,
+                new JdbcRunLifecycleStore(testRunRepository),
+                bridge,
+                Runnable::run
+        );
+        first.runTest(def.id());
+        first.runTest(def.id());
+
+        TestService cold = new TestService(
+                testRepository,
+                new JdbcRunLifecycleStore(testRunRepository),
+                mock(PythonRunnerBridge.class),
+                Runnable::run
+        );
+        assertEquals(2, cold.listRuns(def.id()).size());
+        assertEquals(TestStatus.FAILED, cold.listRuns(def.id()).get(0).status());
+        assertEquals(TestStatus.FAILED, cold.getTerminalTest(def.id()).getStatus());
+        assertEquals("second", cold.getTerminalTest(def.id()).getStdout());
+    }
+
+    @Test
+    void rejectedAndRecoveredRunsAppearInHistory() {
+        TestEntity def = insertDefinition("history-reject-recover");
+        TestService rejecting = new TestService(
+                testRepository,
+                new JdbcRunLifecycleStore(testRunRepository),
+                mock(PythonRunnerBridge.class),
+                task -> {
+                    throw new RejectedExecutionException("full");
+                }
+        );
+        assertThrows(ExecutorSaturatedException.class, () -> rejecting.runTest(def.id()));
+        assertEquals(1, rejecting.listRuns(def.id()).size());
+        assertEquals(TestStatus.FAILED, rejecting.listRuns(def.id()).get(0).status());
+        assertEquals(
+                FailureCategory.LAUNCH,
+                rejecting.listRuns(def.id()).get(0).failureCategory()
+        );
+
+        UUID orphan = UUID.randomUUID();
+        assertEquals(1, testRunRepository.tryInsertQueued(orphan, def.id(), Instant.now()));
+        assertEquals(1, testRunRepository.tryMarkRunning(orphan, Instant.now()));
+        activeRunRecovery.run(new DefaultApplicationArguments(new String[0]));
+
+        TestService cold = new TestService(
+                testRepository,
+                new JdbcRunLifecycleStore(testRunRepository),
+                mock(PythonRunnerBridge.class),
+                Runnable::run
+        );
+        List<com.netverify.controlplane.api.dto.RunSummaryDto> history = cold.listRuns(def.id());
+        assertTrue(history.stream().anyMatch(r -> r.id().equals(orphan)
+                && r.status() == TestStatus.CANCELLED
+                && r.finishedAt() != null
+                && r.failureCategory() == null));
+        assertTrue(history.stream().anyMatch(r ->
+                r.status() == TestStatus.FAILED && r.failureCategory() == FailureCategory.LAUNCH
+        ));
+    }
+
+    private void insertCompleted(UUID runId, UUID testId, Instant queuedAt, String stdout) {
+        testRunRepository.insert(new TestRunEntity(
+                runId,
+                testId,
+                TestStatus.PASSED,
+                queuedAt,
+                queuedAt,
+                queuedAt,
+                0,
+                null,
+                stdout,
+                "",
+                null
+        ));
+    }
+
     private TestEntity insertDefinition(String name) {
         TestEntity entity = new TestEntity(
                 UUID.randomUUID(), name, "basic_ping_pong", 3, null, Instant.now()
         );
         testRepository.insert(entity);
         return entity;
+    }
+
+    /**
+     * Fresh run PKs with obvious canonical-text order (no retry loop).
+     * Keeps the first 35 chars of a random UUID, then ends with {@code 0} / {@code f}.
+     */
+    private static TieRunIds freshTieRunIds() {
+        String prefix = UUID.randomUUID().toString().substring(0, 35);
+        UUID low = UUID.fromString(prefix + "0");
+        UUID high = UUID.fromString(prefix + "f");
+        assertTrue(low.toString().compareTo(high.toString()) < 0);
+        return new TieRunIds(low, high);
+    }
+
+    private record TieRunIds(UUID low, UUID high) {
     }
 
     private enum RunCallOutcome {

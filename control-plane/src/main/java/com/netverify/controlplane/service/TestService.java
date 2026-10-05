@@ -1,6 +1,7 @@
 package com.netverify.controlplane.service;
 
 import com.netverify.controlplane.api.dto.CreateTestRequest;
+import com.netverify.controlplane.api.dto.RunSummaryDto;
 import com.netverify.controlplane.domain.AllowedScenarios;
 import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
@@ -9,11 +10,11 @@ import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.QueueRunResult;
 import com.netverify.controlplane.persistence.RunLifecycleStore;
 import com.netverify.controlplane.persistence.RunSnapshot;
+import com.netverify.controlplane.persistence.TerminalUpdate;
 import com.netverify.controlplane.persistence.TestEntity;
 import com.netverify.controlplane.persistence.TestRepository;
 import com.netverify.controlplane.runner.PythonRunOutcome;
 import com.netverify.controlplane.runner.PythonRunnerBridge;
-import com.netverify.controlplane.store.TerminalUpdate;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -104,6 +105,17 @@ public class TestService {
     public TestRecord getTest(UUID id) {
         TestEntity entity = requireDefinition(id);
         return compose(entity, lifecycle.findLatest(id));
+    }
+
+    /**
+     * Compact newest-first history for a known definition.
+     * Unknown → 404; known with zero runs → empty list.
+     */
+    public List<RunSummaryDto> listRuns(UUID testId) {
+        requireDefinition(testId);
+        return lifecycle.listRuns(testId).stream()
+                .map(run -> RunSummaryDto.from(testId, run))
+                .toList();
     }
 
     /**

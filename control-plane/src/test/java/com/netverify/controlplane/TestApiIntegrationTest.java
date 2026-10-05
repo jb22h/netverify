@@ -235,4 +235,37 @@ class TestApiIntegrationTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.clients", nullValue()));
     }
+
+    @Test
+    void runsUnknownTestReturns404() throws Exception {
+        mockMvc.perform(get("/api/tests/00000000-0000-0000-0000-000000000001/runs"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void runsForCreatedTestReturnsEmptyArray() throws Exception {
+        MvcResult created = mockMvc.perform(
+                        post("/api/tests")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "name": "no-runs-yet",
+                                          "scenario": "basic_ping_pong",
+                                          "count": 3
+                                        }
+                                        """
+                                )
+                )
+                .andExpect(status().isCreated())
+                .andReturn();
+        String id = objectMapper.readTree(created.getResponse().getContentAsString())
+                .get("id")
+                .asText();
+
+        mockMvc.perform(get("/api/tests/{id}/runs", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray())
+                .andExpect(jsonPath("$.length()", is(0)));
+    }
 }

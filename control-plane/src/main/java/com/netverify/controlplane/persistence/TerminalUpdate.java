@@ -1,12 +1,11 @@
-package com.netverify.controlplane.store;
+package com.netverify.controlplane.persistence;
 
 import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestStatus;
 
 /**
- * All terminal runtime fields applied together by
- * {@link InMemoryTestStore#completeRun}, so readers never observe a
- * half-updated terminal record.
+ * All terminal runtime fields applied together by lifecycle completion, so
+ * readers never observe a half-updated terminal run.
  */
 public record TerminalUpdate(
         TestStatus status,

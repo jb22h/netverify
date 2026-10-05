@@ -3,6 +3,7 @@ package com.netverify.controlplane.api;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -124,6 +125,50 @@ class RunEndpointsIntegrationTest {
         mockMvc.perform(get("/api/tests/{id}/results", id))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status", is("PASSED")));
+
+        String historyBody = mockMvc.perform(get("/api/tests/{id}/runs", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()", is(2)))
+                .andExpect(jsonPath("$[0].testId", is(id)))
+                .andExpect(jsonPath("$[0].id").isNotEmpty())
+                .andExpect(jsonPath("$[0].status", is("PASSED")))
+                .andExpect(jsonPath("$[0].queuedAt").isNotEmpty())
+                .andExpect(jsonPath("$[0].stdout").doesNotExist())
+                .andExpect(jsonPath("$[0].stderr").doesNotExist())
+                .andExpect(jsonPath("$[0].runnerResult").doesNotExist())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        String runId0 = objectMapper.readTree(historyBody).get(0).get("id").asText();
+        String runId1 = objectMapper.readTree(historyBody).get(1).get("id").asText();
+        assertNotEquals(runId0, runId1);
+        // POST /run still returns test id, not run id.
+        assertNotEquals(id, runId0);
+    }
+
+    @Test
+    void historyCompactShapeAfterSingleRun() throws Exception {
+        when(runnerBridge.run(any(), anyInt(), any()))
+                .thenReturn(PythonRunOutcome.passed(0, PASS_RESULT, PASS_STDOUT, ""));
+
+        String id = createTest("history", "basic_ping_pong", 3, null);
+        mockMvc.perform(post("/api/tests/{id}/run", id)).andExpect(status().isAccepted());
+        awaitTerminal(id);
+
+        mockMvc.perform(get("/api/tests/{id}/runs", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()", is(1)))
+                .andExpect(jsonPath("$[0].id").isNotEmpty())
+                .andExpect(jsonPath("$[0].testId", is(id)))
+                .andExpect(jsonPath("$[0].status", is("PASSED")))
+                .andExpect(jsonPath("$[0].queuedAt").isNotEmpty())
+                .andExpect(jsonPath("$[0].startedAt").isNotEmpty())
+                .andExpect(jsonPath("$[0].finishedAt").isNotEmpty())
+                .andExpect(jsonPath("$[0].exitCode", is(0)))
+                .andExpect(jsonPath("$[0].failureCategory", nullValue()))
+                .andExpect(jsonPath("$[0].stdout").doesNotExist())
+                .andExpect(jsonPath("$[0].stderr").doesNotExist())
+                .andExpect(jsonPath("$[0].runnerResult").doesNotExist());
     }
 
     @Test

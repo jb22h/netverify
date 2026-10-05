@@ -7,9 +7,10 @@ import com.netverify.controlplane.persistence.RunSnapshot;
 import com.netverify.controlplane.persistence.TestEntity;
 import com.netverify.controlplane.persistence.TestRunEntity;
 import com.netverify.controlplane.persistence.TestRunRepository;
+import com.netverify.controlplane.persistence.TerminalUpdate;
 import com.netverify.controlplane.runner.RunnerResultDto;
-import com.netverify.controlplane.store.TerminalUpdate;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.context.annotation.Profile;
@@ -70,6 +71,13 @@ public class JdbcRunLifecycleStore implements RunLifecycleStore {
     @Override
     public Optional<RunSnapshot> findLatest(UUID testId) {
         return testRunRepository.findLatestByTestId(testId).map(this::toSnapshot);
+    }
+
+    @Override
+    public List<RunSnapshot> listRuns(UUID testId) {
+        return testRunRepository.findAllByTestId(testId).stream()
+                .map(this::toSnapshot)
+                .toList();
     }
 
     private RunSnapshot toSnapshot(TestRunEntity entity) {

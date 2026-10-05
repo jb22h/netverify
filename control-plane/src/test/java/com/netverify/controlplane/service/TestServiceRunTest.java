@@ -2,6 +2,7 @@ package com.netverify.controlplane.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -13,6 +14,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.netverify.controlplane.api.dto.CreateTestRequest;
+import com.netverify.controlplane.api.dto.RunSummaryDto;
 import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
@@ -20,11 +22,11 @@ import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.InMemoryRunLifecycleStore;
 import com.netverify.controlplane.persistence.InMemoryTestRepository;
 import com.netverify.controlplane.persistence.RunLifecycleStore;
+import com.netverify.controlplane.persistence.RunSnapshot;
 import com.netverify.controlplane.persistence.TestRepository;
 import com.netverify.controlplane.runner.PythonRunOutcome;
 import com.netverify.controlplane.runner.PythonRunnerBridge;
 import com.netverify.controlplane.runner.RunnerResultDto;
-import com.netverify.controlplane.store.InMemoryTestStore;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -39,15 +41,13 @@ class TestServiceRunTest {
     );
 
     private TestRepository testRepository;
-    private InMemoryTestStore store;
     private RunLifecycleStore lifecycle;
     private PythonRunnerBridge bridge;
 
     @BeforeEach
     void setUp() {
         testRepository = new InMemoryTestRepository();
-        store = new InMemoryTestStore();
-        lifecycle = new InMemoryRunLifecycleStore(store);
+        lifecycle = new InMemoryRunLifecycleStore();
         bridge = mock(PythonRunnerBridge.class);
     }
 
@@ -59,7 +59,7 @@ class TestServiceRunTest {
 
         service.runTest(id);
 
-        TestRecord record = store.get(id).orElseThrow();
+        TestRecord record = service.getTest(id);
         assertEquals(TestStatus.PASSED, record.getStatus());
         assertNull(record.getFailureCategory());
         assertEquals(0, record.getExitCode());
@@ -118,7 +118,7 @@ class TestServiceRunTest {
 
         service.runTest(id);
 
-        TestRecord record = store.get(id).orElseThrow();
+        TestRecord record = service.getTest(id);
         assertEquals("no interpreter", record.getStderr());
         assertEquals(1, countOccurrences(record.getStderr(), "no interpreter"));
         assertEquals("", record.getStdout());
@@ -135,9 +135,13 @@ class TestServiceRunTest {
 
         TestService.QueuedRun queuedRun = service.runTest(id);
 
-        TestRecord record = store.get(id).orElseThrow();
+        TestRecord record = service.getTest(id);
         assertFalse(queuedRun.queuedAt().isAfter(record.getStartedAt()));
         assertFalse(queuedRun.queuedAt().isAfter(record.getFinishedAt()));
+        assertEquals(
+                queuedRun.queuedAt(),
+                lifecycle.findLatest(id).orElseThrow().queuedAt()
+        );
     }
 
     @Test
@@ -159,7 +163,7 @@ class TestServiceRunTest {
 
         service.runTest(id);
 
-        TestRecord record = store.get(id).orElseThrow();
+        TestRecord record = service.getTest(id);
         assertEquals(TestStatus.FAILED, record.getStatus());
         assertEquals(FailureCategory.LAUNCH, record.getFailureCategory());
         assertNotNull(record.getFinishedAt());
@@ -172,11 +176,16 @@ class TestServiceRunTest {
 
         assertThrows(ExecutorSaturatedException.class, () -> service.runTest(id));
 
-        TestRecord record = store.get(id).orElseThrow();
+        TestRecord record = service.getTest(id);
         assertEquals(TestStatus.FAILED, record.getStatus());
         assertEquals(FailureCategory.LAUNCH, record.getFailureCategory());
         assertNotNull(record.getFinishedAt());
         verifyNoInteractions(bridge);
+
+        List<RunSummaryDto> history = service.listRuns(id);
+        assertEquals(1, history.size());
+        assertEquals(TestStatus.FAILED, history.get(0).status());
+        assertEquals(FailureCategory.LAUNCH, history.get(0).failureCategory());
     }
 
     @Test
@@ -187,7 +196,9 @@ class TestServiceRunTest {
         service.runTest(id);
 
         assertThrows(ConflictException.class, () -> service.runTest(id));
-        assertEquals(TestStatus.QUEUED, store.get(id).orElseThrow().getStatus());
+        assertEquals(TestStatus.QUEUED, service.getTest(id).getStatus());
+        assertEquals(1, service.listRuns(id).size());
+        assertEquals(TestStatus.QUEUED, service.listRuns(id).get(0).status());
     }
 
     @Test
@@ -204,8 +215,7 @@ class TestServiceRunTest {
 
         service.executeRun(id, UUID.randomUUID());
 
-        // Create does not install runtime; cold executeRun is a no-op.
-        assertTrue(store.get(id).isEmpty());
+        assertTrue(lifecycle.findLatest(id).isEmpty());
         assertEquals(TestStatus.CREATED, service.getTest(id).getStatus());
         verifyNoInteractions(bridge);
     }
@@ -252,6 +262,56 @@ class TestServiceRunTest {
         assertEquals(TestStatus.PASSED, service.getTerminalTest(id).getStatus());
     }
 
+    @Test
+    void listRunsUnknownIs404AndZeroRunIsEmpty() {
+        TestService service = serviceWith(new SynchronousExecutor());
+        assertThrows(NotFoundException.class, () -> service.listRuns(UUID.randomUUID()));
+
+        UUID id = createTest(service, "basic_ping_pong", 3, null);
+        assertEquals(List.of(), service.listRuns(id));
+    }
+
+    @Test
+    void listRunsExposesDistinctRunUuidsAndKeepsLatestView() {
+        TestService service = serviceWith(new SynchronousExecutor());
+        UUID id = createTest(service, "basic_ping_pong", 3, null);
+        stubBridge(PythonRunOutcome.passed(0, PASS_RESULT, "{}", ""));
+
+        service.runTest(id);
+        stubBridge(PythonRunOutcome.failed(
+                FailureCategory.VERIFICATION, 1, PASS_RESULT, "{}", "", "second"
+        ));
+        service.runTest(id);
+
+        List<RunSummaryDto> history = service.listRuns(id);
+        assertEquals(2, history.size());
+        assertNotEquals(history.get(0).id(), history.get(1).id());
+        assertEquals(id, history.get(0).testId());
+        assertEquals(TestStatus.FAILED, history.get(0).status());
+        assertEquals(TestStatus.PASSED, history.get(1).status());
+
+        // Latest-view still describes only the newest run.
+        assertEquals(TestStatus.FAILED, service.getTest(id).getStatus());
+        assertEquals("second", service.getTerminalTest(id).getStderr());
+        assertEquals(FailureCategory.VERIFICATION, history.get(0).failureCategory());
+        assertEquals(1, history.get(0).exitCode());
+    }
+
+    @Test
+    void activeQueuedAppearsInHistory() {
+        TestService service = serviceWith(new NoopExecutor());
+        UUID id = createTest(service, "basic_ping_pong", 3, null);
+        service.runTest(id);
+
+        List<RunSummaryDto> history = service.listRuns(id);
+        assertEquals(1, history.size());
+        assertEquals(TestStatus.QUEUED, history.get(0).status());
+        assertNotNull(history.get(0).queuedAt());
+        assertNull(history.get(0).finishedAt());
+        RunSnapshot latest = lifecycle.findLatest(id).orElseThrow();
+        assertEquals(latest.runId(), history.get(0).id());
+    }
+
     private void assertFailedRun(
             PythonRunOutcome outcome,
             FailureCategory expectedCategory,
@@ -263,7 +323,7 @@ class TestServiceRunTest {
 
         service.runTest(id);
 
-        TestRecord record = store.get(id).orElseThrow();
+        TestRecord record = service.getTest(id);
         assertEquals(TestStatus.FAILED, record.getStatus());
         assertEquals(expectedCategory, record.getFailureCategory());
         assertEquals(expectedExitCode, record.getExitCode());

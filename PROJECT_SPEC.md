@@ -563,14 +563,14 @@ Goal: Turn the test framework into a software platform.
 
 **Status: COMPLETE**
 
-What exists under `control-plane/` (Java 21 + Maven + Spring Boot):
-- In-memory persistence only (latest state/result per test; no durable history)
+What existed under `control-plane/` at Phase 8 completion (Java 21 + Maven + Spring Boot):
+- In-memory persistence only at that time (latest state/result per test)
 - REST API that creates tests and starts runs asynchronously
 - Bounded Java executor + `ProcessBuilder` launching `automation/runner.py --json`
 - Existing C `net_server` / `net_client` driven by the Python runner
-- No Redis, PostgreSQL, Docker, React, AWS, or distributed workers yet
+- No Redis, Docker, React, AWS, or distributed workers yet
 
-HTTP endpoints:
+HTTP endpoints (Phase 8 base; Phase 9 adds history — see below):
 ```text
 POST /api/tests
 GET  /api/tests
@@ -641,32 +641,87 @@ Backend responsibilities implemented:
 Definition of Done:
 - ✅ A test can be created and started through an HTTP API.
 
-Durable persistence and run history belong to Phase 9.
-
 ---
 
 ## Phase 9 — PostgreSQL Persistence
 Goal: Persist tests and results.
 
-Tasks:
-1. Add database schema.
-2. Use migrations.
-3. Persist TestScenario.
-4. Persist TestRun.
-5. Persist metrics.
-6. Persist failure information.
-7. Query historical test runs.
+**Status: COMPLETE**
 
-Topics:
-- primary keys
-- foreign keys
-- indexes
-- transactions
-- normalization
-- JSON vs relational columns
+### Architecture
+
+```text
+TestService
+  → TestRepository          (immutable definitions)
+  → RunLifecycleStore       (run lifecycle + history)
+```
+
+| Profile | Definitions | Runs |
+|---------|-------------|------|
+| default (DB-free) | `InMemoryTestRepository` | `InMemoryRunLifecycleStore` |
+| `postgres` | `JdbcTestRepository` | `JdbcRunLifecycleStore` → `TestRunRepository` |
+
+The old `InMemoryTestStore` lifecycle was retired. Stack: Spring JDBC / `JdbcTemplate`, Flyway **V1** (`tests` + `test_runs`), PostgreSQL JSONB for heterogeneous `runner_result`, relational `failure_category`. No JPA. No V2 migration.
+
+PostgreSQL profile env (never commit real values):
+- `NETVERIFY_DB_URL`
+- `NETVERIFY_DB_USER`
+- `NETVERIFY_DB_PASSWORD`
+
+### Milestones
+
+**M1 — Foundation**
+- JDBC / Flyway / postgres profile wiring
+- Schema: `tests`, `test_runs`, indexes (including partial unique one-active-run)
+- Repository interfaces + JDBC implementations
+
+**M2 — Durable definitions**
+- `TestRepository` as immutable definition source of truth
+- Create/list/get compose definition + latest run (CREATED when no runs)
+- List ordering: `created_at ASC`, then canonical UUID text ASC
+
+**M3 — Persisted run lifecycle**
+- Each execution has its own run UUID
+- `QUEUED → RUNNING → PASSED | FAILED` via conditional SQL
+- Executor rejection: `QUEUED → FAILED` (`LAUNCH`); releases active slot
+- At most one active (`QUEUED`/`RUNNING`) run per test (partial unique index)
+- Startup recovery: orphan `QUEUED`/`RUNNING` → `CANCELLED` (single-instance assumption; no multi-instance leases/coordination)
+- Latest results/logs/metrics survive restart under `postgres`
+
+**M4 — History + closure**
+- `GET /api/tests/{id}/runs` compact newest-first history
+- Ordering: `queued_at DESC`, run UUID canonical text `DESC`
+- In-memory path rewritten as real multi-run `InMemoryRunLifecycleStore`
+- POST `/run` remains backward-compatible (`id` = test id); run UUID via history only
+- No `GET /runs/{runId}`; no history pagination yet (scale limitation)
+
+### History endpoint
+
+```text
+GET /api/tests/{id}/runs
+```
+
+- unknown test → 404
+- known, zero runs → 200 `[]`
+- otherwise compact newest-first entries: `id` (run UUID), `testId`, `status`,
+  `queuedAt`, `startedAt`, `finishedAt`, `exitCode`, `failureCategory`
+- omits `stdout` / `stderr` / `runnerResult` (latest-only detail endpoints keep those)
+
+Existing `GET /api/tests/{id}`, `/results`, `/logs`, `/metrics` remain latest-run oriented.
+
+### Restart semantics
+
+Under `postgres`: definitions, full run history, and latest results/logs/metrics survive backend restart; a persisted test can be run again. Default in-memory profile is process-local and does not survive restart.
+
+### Verification
+
+- Full suite: **114** tests
+- DB-free: PostgreSQL integration tests skipped as expected (opt-in via `NETVERIFY_DB_*`)
+- PostgreSQL + real runner (`NETVERIFY_DB_*` + `NETVERIFY_REPO_ROOT`): **114** tests, 0 failures, 0 errors, 0 skipped
+- Real HTTP restart verification: two distinct persisted run IDs, history ordering, identical history/results/logs/metrics after JVM restart
 
 Definition of Done:
-- Restarting the backend does not lose test history.
+- ✅ Restarting the backend does not lose test history (postgres profile).
 
 ---
 
@@ -1001,7 +1056,7 @@ Short version:
 
 Longer version:
 
-> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs and in-memory results today; PostgreSQL durable persistence is next, and distributed workers come later. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
+> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs with optional PostgreSQL durability for definitions, run history, and results; distributed workers come later. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
 
 ---
 
@@ -1050,7 +1105,7 @@ I am building a portfolio project called NetVerify.
 
 Read PROJECT_SPEC.md before doing anything.
 
-NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (in-memory results today). PostgreSQL durable persistence, Redis for distributed jobs, and a React/TypeScript dashboard come later.
+NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (optional PostgreSQL persistence for definitions and run history). Redis for distributed jobs and a React/TypeScript dashboard come later.
 
 This is an educational Software Engineering project. Do not build the whole project for me. Work one milestone at a time, explain architectural decisions, and make sure I can understand and explain the code in an interview.
 
@@ -1072,7 +1127,10 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 9 — PostgreSQL Persistence`
+`Phase 9 — PostgreSQL Persistence (COMPLETE)`
+
+Next phase:
+`Phase 10 — Queue and Workers (NOT STARTED)`
 
 Completed:
 
@@ -1277,8 +1335,6 @@ Completed:
 
 **Phase 8 — Java Spring Boot Control Plane**
 - Java 21 + Maven + Spring Boot module under control-plane/
-- In-memory ConcurrentHashMap store only (latest state/result;
-  no durable history; restart loses all tests)
 - REST endpoints: POST/GET /api/tests, GET /api/tests/{id},
   POST /api/tests/{id}/run, GET /api/tests/{id}/results|logs|metrics
 - HTTP-allowed scenarios: basic_ping_pong, connect_fail_no_server,
@@ -1300,14 +1356,31 @@ Completed:
   integration test when NETVERIFY_REPO_ROOT is set
 - Definition of Done met: a test can be created and started through
   an HTTP API
-- Deferred to later phases: PostgreSQL persistence/history (Phase 9),
-  Redis/distributed workers, Docker, React, AWS
+
+**Phase 9 — PostgreSQL Persistence**
+- COMPLETE (M1–M4)
+- Flyway V1: `tests` + `test_runs`; Spring JDBC / JdbcTemplate; no JPA
+- Profiles: default DB-free (`InMemoryTestRepository` +
+  `InMemoryRunLifecycleStore`); `postgres` via NETVERIFY_DB_URL /
+  NETVERIFY_DB_USER / NETVERIFY_DB_PASSWORD
+- Definitions immutable in `tests`; every execution in `test_runs`
+  with its own run UUID
+- Lifecycle: QUEUED → RUNNING → PASSED/FAILED; rejection → FAILED/LAUNCH;
+  startup orphan QUEUED/RUNNING → CANCELLED (single-instance)
+- One active run per test (partial unique index); conditional SQL
+- GET /api/tests/{id}/runs compact newest-first history
+  (queued_at DESC, run UUID text DESC); omits logs/result payloads
+- POST /run still returns test id; latest results/logs/metrics unchanged
+- Restart durability under postgres verified (history + latest views)
+- Final verification: 114 tests; PG + real runner 114/0/0/0 skipped
+- Deferred: Redis/distributed workers (Phase 10), Docker, React, AWS;
+  history pagination; GET /runs/{runId}
 
 Next:
-- Begin Phase 9 — PostgreSQL Persistence
+- Begin Phase 10 — Queue and Workers
 
 Last updated:
-2026-09-22
+2026-10-05
 
 ---
 

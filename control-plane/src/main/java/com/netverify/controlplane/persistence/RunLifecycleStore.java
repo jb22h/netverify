@@ -1,20 +1,21 @@
 package com.netverify.controlplane.persistence;
 
 import com.netverify.controlplane.domain.FailureCategory;
-import com.netverify.controlplane.store.TerminalUpdate;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
  * Run lifecycle state machine shared by in-memory and PostgreSQL backends.
- * {@link TestService} must not branch on profile for these transitions.
+ * {@link com.netverify.controlplane.service.TestService} must not branch on
+ * profile for these transitions.
  */
 public interface RunLifecycleStore {
 
     /**
      * Accept a new QUEUED run for the given durable definition.
-     * The definition supplies the test id (and, for in-memory, skeleton fields).
+     * The definition supplies the test id.
      */
     QueueRunResult tryQueue(TestEntity definition, UUID runId, Instant queuedAt);
 
@@ -38,4 +39,11 @@ public interface RunLifecycleStore {
 
     /** Latest run for latest-view composition; empty means API CREATED. */
     Optional<RunSnapshot> findLatest(UUID testId);
+
+    /**
+     * All runs for a test, newest first:
+     * {@code queuedAt DESC}, then canonical run UUID text {@code DESC}.
+     * Empty when the test has never been run. Returned list is immutable.
+     */
+    List<RunSnapshot> listRuns(UUID testId);
 }
