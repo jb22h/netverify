@@ -1,0 +1,9 @@
+# Activated only with --spring.profiles.active=redis
+# Connection settings come from the environment; never commit secrets.
+netverify:
+  redis:
+    host: ${NETVERIFY_REDIS_HOST:}
+    port: ${NETVERIFY_REDIS_PORT:6379}
+  queue:
+    stream: netverify:runs
+    group: netverify-workers
