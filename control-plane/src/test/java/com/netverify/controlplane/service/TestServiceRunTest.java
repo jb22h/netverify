@@ -17,7 +17,9 @@ import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
+import com.netverify.controlplane.persistence.InMemoryRunLifecycleStore;
 import com.netverify.controlplane.persistence.InMemoryTestRepository;
+import com.netverify.controlplane.persistence.RunLifecycleStore;
 import com.netverify.controlplane.persistence.TestRepository;
 import com.netverify.controlplane.runner.PythonRunOutcome;
 import com.netverify.controlplane.runner.PythonRunnerBridge;
@@ -38,12 +40,14 @@ class TestServiceRunTest {
 
     private TestRepository testRepository;
     private InMemoryTestStore store;
+    private RunLifecycleStore lifecycle;
     private PythonRunnerBridge bridge;
 
     @BeforeEach
     void setUp() {
         testRepository = new InMemoryTestRepository();
         store = new InMemoryTestStore();
+        lifecycle = new InMemoryRunLifecycleStore(store);
         bridge = mock(PythonRunnerBridge.class);
     }
 
@@ -198,7 +202,7 @@ class TestServiceRunTest {
         TestService service = serviceWith(new NoopExecutor());
         UUID id = createTest(service, "basic_ping_pong", 3, null);
 
-        service.executeRun(id);
+        service.executeRun(id, UUID.randomUUID());
 
         // Create does not install runtime; cold executeRun is a no-op.
         assertTrue(store.get(id).isEmpty());
@@ -210,7 +214,7 @@ class TestServiceRunTest {
     void workerIgnoresUnknownId() {
         TestService service = serviceWith(new NoopExecutor());
 
-        service.executeRun(UUID.randomUUID());
+        service.executeRun(UUID.randomUUID(), UUID.randomUUID());
 
         verifyNoInteractions(bridge);
     }
@@ -279,7 +283,7 @@ class TestServiceRunTest {
     }
 
     private TestService serviceWith(RunnerTaskExecutor executor) {
-        return new TestService(testRepository, store, bridge, executor);
+        return new TestService(testRepository, lifecycle, bridge, executor);
     }
 
     private static UUID createTest(

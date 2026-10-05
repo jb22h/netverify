@@ -6,12 +6,13 @@ import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
+import com.netverify.controlplane.persistence.QueueRunResult;
+import com.netverify.controlplane.persistence.RunLifecycleStore;
+import com.netverify.controlplane.persistence.RunSnapshot;
 import com.netverify.controlplane.persistence.TestEntity;
 import com.netverify.controlplane.persistence.TestRepository;
 import com.netverify.controlplane.runner.PythonRunOutcome;
 import com.netverify.controlplane.runner.PythonRunnerBridge;
-import com.netverify.controlplane.store.InMemoryTestStore;
-import com.netverify.controlplane.store.QueueTransitionResult;
 import com.netverify.controlplane.store.TerminalUpdate;
 import java.time.Instant;
 import java.util.List;
@@ -28,18 +29,18 @@ public class TestService {
     private static final Logger log = LoggerFactory.getLogger(TestService.class);
 
     private final TestRepository testRepository;
-    private final InMemoryTestStore store;
+    private final RunLifecycleStore lifecycle;
     private final PythonRunnerBridge runnerBridge;
     private final RunnerTaskExecutor executor;
 
     public TestService(
             TestRepository testRepository,
-            InMemoryTestStore store,
+            RunLifecycleStore lifecycle,
             PythonRunnerBridge runnerBridge,
             RunnerTaskExecutor executor
     ) {
         this.testRepository = testRepository;
-        this.store = store;
+        this.lifecycle = lifecycle;
         this.runnerBridge = runnerBridge;
         this.executor = executor;
     }
@@ -91,23 +92,22 @@ public class TestService {
                 Instant.now()
         );
         testRepository.insert(entity);
-        // Definition-only create: no runtime row until /run.
         return compose(entity, Optional.empty());
     }
 
     public List<TestRecord> listTests() {
         return testRepository.list().stream()
-                .map(entity -> compose(entity, store.get(entity.id())))
+                .map(entity -> compose(entity, lifecycle.findLatest(entity.id())))
                 .toList();
     }
 
     public TestRecord getTest(UUID id) {
         TestEntity entity = requireDefinition(id);
-        return compose(entity, store.get(id));
+        return compose(entity, lifecycle.findLatest(id));
     }
 
     /**
-     * Returns a composed view only once the in-memory run is terminal.
+     * Returns a composed view only once the latest run is terminal.
      * Unknown definitions → 404; known but cold / non-terminal → 409.
      */
     public TestRecord getTerminalTest(UUID id) {
@@ -121,32 +121,29 @@ public class TestService {
     }
 
     /**
-     * Queues a run atomically and hands execution to the bounded executor.
+     * Queues a run and hands execution to the bounded executor.
      *
-     * @return the id/queue timestamp of the accepted run
+     * @return test id and accepted queued timestamp (public id remains the test id)
      */
     public QueuedRun runTest(UUID id) {
-        TestEntity entity = requireDefinition(id);
-        store.ensurePresent(skeletonFrom(entity));
+        TestEntity definition = requireDefinition(id);
+        UUID runId = UUID.randomUUID();
+        Instant queuedAt = Instant.now();
 
-        QueueTransitionResult queued = store.tryQueueForRun(id);
-        switch (queued) {
-            case NOT_FOUND -> throw new NotFoundException("test not found: " + id);
-            case CONFLICT -> throw new ConflictException(
-                    "test " + id + " is already queued or running"
-            );
-            case SUCCESS -> { /* proceed */ }
+        QueueRunResult queued = lifecycle.tryQueue(definition, runId, queuedAt);
+        if (queued == QueueRunResult.CONFLICT) {
+            throw new ConflictException("test " + id + " is already queued or running");
         }
 
-        // Stamped before submission so a synchronous or very fast executor cannot
-        // report a queuedAt later than the run it already finished.
-        Instant queuedAt = Instant.now();
         try {
-            executor.submit(() -> executeRun(id));
+            executor.submit(() -> executeRun(id, runId));
         } catch (RejectedExecutionException ex) {
-            // Never leave the record stuck in QUEUED when nothing will run it.
-            store.failQueued(
-                    id, FailureCategory.LAUNCH, "runner executor rejected submission: " + ex
+            lifecycle.tryFailQueued(
+                    id,
+                    runId,
+                    FailureCategory.LAUNCH,
+                    "runner executor rejected submission: " + ex,
+                    Instant.now()
             );
             throw new ExecutorSaturatedException(
                     "runner executor is saturated; retry later"
@@ -155,42 +152,50 @@ public class TestService {
         return new QueuedRun(id, queuedAt);
     }
 
-    void executeRun(UUID id) {
+    void executeRun(UUID testId, UUID runId) {
         try {
-            TestRecord record = store.get(id).orElse(null);
-            if (record == null) {
-                return;
-            }
-            if (store.tryStartRunning(id) != QueueTransitionResult.SUCCESS) {
+            if (!lifecycle.tryStartRunning(testId, runId, Instant.now())) {
                 // State changed underneath us; do not launch Python.
                 return;
             }
 
-            // Prefer durable definition fields over any stale copies on the runtime row.
-            TestEntity entity = testRepository.findById(id).orElse(null);
-            String scenario = entity != null ? entity.scenario() : record.getScenario();
-            int count = entity != null ? entity.count() : record.getCount();
-            Integer clients = entity != null ? entity.clients() : record.getClients();
+            TestEntity entity = testRepository.findById(testId).orElse(null);
+            if (entity == null) {
+                log.error("definition missing for running test {}", testId);
+                lifecycle.tryComplete(
+                        testId,
+                        runId,
+                        TerminalUpdate.failed(
+                                FailureCategory.LAUNCH, null, null, "",
+                                "test definition missing during run"
+                        ),
+                        Instant.now()
+                );
+                return;
+            }
 
             PythonRunOutcome outcome;
             try {
-                outcome = runnerBridge.run(scenario, count, clients);
+                outcome = runnerBridge.run(
+                        entity.scenario(), entity.count(), entity.clients()
+                );
             } catch (RuntimeException ex) {
-                log.warn("runner bridge failed for test {}", id, ex);
+                log.warn("runner bridge failed for test {}", testId, ex);
                 outcome = PythonRunOutcome.preLaunchFailure(
                         FailureCategory.LAUNCH, "unexpected runner error: " + ex
                 );
             }
-            store.completeRun(id, toTerminalUpdate(outcome));
+            lifecycle.tryComplete(testId, runId, toTerminalUpdate(outcome), Instant.now());
         } catch (RuntimeException ex) {
-            // Last resort: a worker must never strand a record in RUNNING.
-            log.error("unexpected worker failure for test {}", id, ex);
-            store.completeRun(
-                    id,
+            log.error("unexpected worker failure for test {}", testId, ex);
+            lifecycle.tryComplete(
+                    testId,
+                    runId,
                     TerminalUpdate.failed(
                             FailureCategory.LAUNCH, null, null, "",
                             "unexpected worker error: " + ex
-                    )
+                    ),
+                    Instant.now()
             );
         }
     }
@@ -202,22 +207,22 @@ public class TestService {
 
     /**
      * Definition fields always from {@link TestEntity}; mutable run fields from
-     * runtime when present, otherwise CREATED with null run metadata.
+     * {@link RunSnapshot} when present, otherwise CREATED with null run metadata.
      */
-    static TestRecord compose(TestEntity entity, Optional<TestRecord> runtime) {
+    static TestRecord compose(TestEntity entity, Optional<RunSnapshot> latest) {
         TestRecord view = skeletonFrom(entity);
-        if (runtime.isEmpty()) {
+        if (latest.isEmpty()) {
             return view;
         }
-        TestRecord run = runtime.get();
-        view.setStatus(run.getStatus());
-        view.setStartedAt(run.getStartedAt());
-        view.setFinishedAt(run.getFinishedAt());
-        view.setExitCode(run.getExitCode());
-        view.setRunnerResult(run.getRunnerResult());
-        view.setStdout(run.getStdout());
-        view.setStderr(run.getStderr());
-        view.setFailureCategory(run.getFailureCategory());
+        RunSnapshot run = latest.get();
+        view.setStatus(run.status());
+        view.setStartedAt(run.startedAt());
+        view.setFinishedAt(run.finishedAt());
+        view.setExitCode(run.exitCode());
+        view.setRunnerResult(run.runnerResult());
+        view.setStdout(run.stdout());
+        view.setStderr(run.stderr());
+        view.setFailureCategory(run.failureCategory());
         return view;
     }
 
@@ -276,7 +281,7 @@ public class TestService {
         return clients;
     }
 
-    /** Accepted-run acknowledgement, independent of how fast the worker starts. */
+    /** Accepted-run acknowledgement; public {@code id} is the test id. */
     public record QueuedRun(UUID id, Instant queuedAt) {
     }
 }

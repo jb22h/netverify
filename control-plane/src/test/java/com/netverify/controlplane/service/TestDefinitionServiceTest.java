@@ -15,7 +15,9 @@ import com.netverify.controlplane.api.dto.CreateTestRequest;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
+import com.netverify.controlplane.persistence.InMemoryRunLifecycleStore;
 import com.netverify.controlplane.persistence.InMemoryTestRepository;
+import com.netverify.controlplane.persistence.RunSnapshot;
 import com.netverify.controlplane.persistence.TestEntity;
 import com.netverify.controlplane.persistence.TestRepository;
 import com.netverify.controlplane.runner.PythonRunOutcome;
@@ -42,7 +44,12 @@ class TestDefinitionServiceTest {
         testRepository = new InMemoryTestRepository();
         store = new InMemoryTestStore();
         bridge = mock(PythonRunnerBridge.class);
-        service = new TestService(testRepository, store, bridge, new SynchronousExecutor());
+        service = new TestService(
+                testRepository,
+                new InMemoryRunLifecycleStore(store),
+                bridge,
+                new SynchronousExecutor()
+        );
     }
 
     @Test
@@ -97,11 +104,18 @@ class TestDefinitionServiceTest {
         TestEntity entity = new TestEntity(
                 id, "canonical", "basic_ping_pong", 7, null, Instant.now()
         );
-        TestRecord staleRuntime = new TestRecord(
-                id, "wrong-name", "connect_fail_no_server", 99, null, Instant.EPOCH
+        RunSnapshot staleRuntime = new RunSnapshot(
+                id,
+                TestStatus.PASSED,
+                Instant.EPOCH,
+                Instant.EPOCH,
+                Instant.EPOCH,
+                0,
+                null,
+                "",
+                "",
+                null
         );
-        staleRuntime.setStatus(TestStatus.PASSED);
-        staleRuntime.setExitCode(0);
 
         TestRecord view = TestService.compose(entity, Optional.of(staleRuntime));
 
@@ -157,7 +171,10 @@ class TestDefinitionServiceTest {
         TestRepository repo = new InMemoryTestRepository();
         InMemoryTestStore runtime = new InMemoryTestStore();
         TestService queuedService = new TestService(
-                repo, runtime, bridge, task -> { /* never run */ }
+                repo,
+                new InMemoryRunLifecycleStore(runtime),
+                bridge,
+                task -> { /* never run */ }
         );
         UUID id = createWith(queuedService, "q2", "basic_ping_pong", 3, null).getId();
         queuedService.runTest(id);

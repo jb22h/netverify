@@ -21,6 +21,12 @@ import org.springframework.stereotype.Repository;
 @Profile("postgres")
 public class JdbcTestRunRepository implements TestRunRepository {
 
+    private static final String SELECT_COLUMNS = """
+            id, test_id, status, queued_at, started_at, finished_at,
+            exit_code, failure_category, stdout, stderr,
+            runner_result::text AS runner_result
+            """;
+
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final RowMapper<TestRunEntity> rowMapper;
@@ -70,19 +76,146 @@ public class JdbcTestRunRepository implements TestRunRepository {
     public Optional<TestRunEntity> findById(UUID id) {
         try {
             return Optional.of(jdbcTemplate.queryForObject(
-                    """
-                    SELECT id, test_id, status, queued_at, started_at, finished_at,
-                           exit_code, failure_category, stdout, stderr,
-                           runner_result::text AS runner_result
-                    FROM test_runs
-                    WHERE id = ?
-                    """,
+                    "SELECT " + SELECT_COLUMNS + " FROM test_runs WHERE id = ?",
                     rowMapper,
                     id
             ));
         } catch (EmptyResultDataAccessException ex) {
             return Optional.empty();
         }
+    }
+
+    @Override
+    public int tryInsertQueued(UUID runId, UUID testId, Instant queuedAt) {
+        // Conflict target matches uq_test_runs_one_active_per_test. FK/other errors propagate.
+        return jdbcTemplate.update(
+                """
+                INSERT INTO test_runs (
+                    id, test_id, status, queued_at, started_at, finished_at,
+                    exit_code, failure_category, stdout, stderr, runner_result
+                ) VALUES (?, ?, 'QUEUED', ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+                ON CONFLICT (test_id) WHERE (status IN ('QUEUED', 'RUNNING')) DO NOTHING
+                """,
+                runId,
+                testId,
+                Timestamp.from(queuedAt)
+        );
+    }
+
+    @Override
+    public Optional<TestRunEntity> findLatestByTestId(UUID testId) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    """
+                    SELECT %s
+                    FROM test_runs
+                    WHERE test_id = ?
+                    ORDER BY queued_at DESC, id::text DESC
+                    LIMIT 1
+                    """.formatted(SELECT_COLUMNS),
+                    rowMapper,
+                    testId
+            ));
+        } catch (EmptyResultDataAccessException ex) {
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public int tryMarkRunning(UUID runId, Instant startedAt) {
+        return jdbcTemplate.update(
+                """
+                UPDATE test_runs
+                SET status = 'RUNNING', started_at = ?
+                WHERE id = ? AND status = 'QUEUED'
+                """,
+                Timestamp.from(startedAt),
+                runId
+        );
+    }
+
+    @Override
+    public int tryComplete(
+            UUID runId,
+            TestStatus terminalStatus,
+            Integer exitCode,
+            FailureCategory failureCategory,
+            String stdout,
+            String stderr,
+            RunnerResultDto runnerResult,
+            Instant finishedAt
+    ) {
+        if (terminalStatus != TestStatus.PASSED && terminalStatus != TestStatus.FAILED) {
+            throw new IllegalArgumentException(
+                    "terminal status must be PASSED or FAILED: " + terminalStatus
+            );
+        }
+        return jdbcTemplate.update(
+                """
+                UPDATE test_runs
+                SET status = ?,
+                    exit_code = ?,
+                    failure_category = ?,
+                    stdout = ?,
+                    stderr = ?,
+                    runner_result = CAST(? AS jsonb),
+                    finished_at = ?
+                WHERE id = ? AND status = 'RUNNING'
+                """,
+                terminalStatus.name(),
+                exitCode,
+                failureCategory == null ? null : failureCategory.name(),
+                stdout,
+                stderr,
+                writeRunnerResult(runnerResult),
+                Timestamp.from(finishedAt),
+                runId
+        );
+    }
+
+    @Override
+    public int tryFailQueued(
+            UUID runId,
+            FailureCategory category,
+            String stderr,
+            Instant finishedAt
+    ) {
+        return jdbcTemplate.update(
+                """
+                UPDATE test_runs
+                SET status = 'FAILED',
+                    failure_category = ?,
+                    stdout = '',
+                    stderr = ?,
+                    finished_at = ?,
+                    exit_code = NULL,
+                    runner_result = NULL
+                WHERE id = ? AND status = 'QUEUED'
+                """,
+                category == null ? null : category.name(),
+                stderr == null ? "" : stderr,
+                Timestamp.from(finishedAt),
+                runId
+        );
+    }
+
+    @Override
+    public int cancelAllActive(Instant finishedAt, String stderrNote) {
+        String note = stderrNote == null ? "" : stderrNote;
+        return jdbcTemplate.update(
+                """
+                UPDATE test_runs
+                SET status = 'CANCELLED',
+                    finished_at = ?,
+                    stderr = CASE
+                        WHEN stderr IS NULL OR stderr = '' THEN ?
+                        ELSE stderr
+                    END
+                WHERE status IN ('QUEUED', 'RUNNING')
+                """,
+                Timestamp.from(finishedAt),
+                note
+        );
     }
 
     private String writeRunnerResult(RunnerResultDto result) {

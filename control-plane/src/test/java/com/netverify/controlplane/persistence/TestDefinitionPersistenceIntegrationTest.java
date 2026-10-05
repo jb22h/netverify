@@ -11,11 +11,11 @@ import com.netverify.controlplane.api.dto.CreateTestRequest;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
+import com.netverify.controlplane.persistence.jdbc.JdbcRunLifecycleStore;
 import com.netverify.controlplane.runner.PythonRunOutcome;
 import com.netverify.controlplane.runner.PythonRunnerBridge;
 import com.netverify.controlplane.runner.RunnerResultDto;
 import com.netverify.controlplane.service.TestService;
-import com.netverify.controlplane.store.InMemoryTestStore;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +42,9 @@ class TestDefinitionPersistenceIntegrationTest {
 
     @Autowired
     private TestRepository testRepository;
+
+    @Autowired
+    private TestRunRepository testRunRepository;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -72,33 +75,32 @@ class TestDefinitionPersistenceIntegrationTest {
     }
 
     @Test
-    void coldRuntimeStoreStillReadsPersistedDefinitionAsCreated() {
+    void coldLifecycleStillReadsPersistedDefinitionAsCreated() {
         UUID id = UUID.randomUUID();
         testRepository.insert(new TestEntity(
                 id, "durable", "basic_ping_pong", 4, null, Instant.now()
         ));
 
-        // Fresh runtime store simulates backend restart.
-        InMemoryTestStore coldStore = new InMemoryTestStore();
-        PythonRunnerBridge bridge = mock(PythonRunnerBridge.class);
         TestService service = new TestService(
-                testRepository, coldStore, bridge, Runnable::run
+                testRepository,
+                new JdbcRunLifecycleStore(testRunRepository),
+                mock(PythonRunnerBridge.class),
+                Runnable::run
         );
 
         TestRecord viewed = service.getTest(id);
         assertEquals(TestStatus.CREATED, viewed.getStatus());
         assertEquals("durable", viewed.getName());
-        assertTrue(coldStore.get(id).isEmpty());
+        assertTrue(testRunRepository.findLatestByTestId(id).isEmpty());
     }
 
     @Test
-    void runTestOnRepositoryOnlyDefinitionWorksAndDoesNotWriteTestRuns() {
+    void runTestPersistsATestRunRow() {
         UUID id = UUID.randomUUID();
         testRepository.insert(new TestEntity(
                 id, "run-me", "basic_ping_pong", 3, null, Instant.now()
         ));
 
-        InMemoryTestStore coldStore = new InMemoryTestStore();
         PythonRunnerBridge bridge = mock(PythonRunnerBridge.class);
         when(bridge.run(any(), anyInt(), any())).thenReturn(
                 PythonRunOutcome.passed(
@@ -111,24 +113,31 @@ class TestDefinitionPersistenceIntegrationTest {
                 )
         );
         RunnerTaskExecutor executor = Runnable::run;
-        TestService service = new TestService(testRepository, coldStore, bridge, executor);
+        TestService service = new TestService(
+                testRepository,
+                new JdbcRunLifecycleStore(testRunRepository),
+                bridge,
+                executor
+        );
 
         service.runTest(id);
 
-        assertEquals(TestStatus.PASSED, coldStore.get(id).orElseThrow().getStatus());
+        assertEquals(TestStatus.PASSED, service.getTest(id).getStatus());
         Integer runRows = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM test_runs WHERE test_id = ?",
                 Integer.class,
                 id
         );
-        assertEquals(0, runRows);
+        assertEquals(1, runRows);
     }
 
     @Test
-    void createViaServicePersistsDefinitionWithoutRuntimeOrTestRuns() {
-        InMemoryTestStore coldStore = new InMemoryTestStore();
+    void createViaServicePersistsDefinitionWithoutTestRuns() {
         TestService service = new TestService(
-                testRepository, coldStore, mock(PythonRunnerBridge.class), Runnable::run
+                testRepository,
+                new JdbcRunLifecycleStore(testRunRepository),
+                mock(PythonRunnerBridge.class),
+                Runnable::run
         );
         CreateTestRequest request = new CreateTestRequest();
         request.setName("svc-create");
@@ -138,7 +147,6 @@ class TestDefinitionPersistenceIntegrationTest {
         TestRecord created = service.createTest(request);
 
         assertTrue(testRepository.findById(created.getId()).isPresent());
-        assertTrue(coldStore.get(created.getId()).isEmpty());
         Integer runRows = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM test_runs WHERE test_id = ?",
                 Integer.class,
