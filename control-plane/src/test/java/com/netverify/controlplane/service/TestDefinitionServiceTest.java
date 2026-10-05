@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 import com.netverify.controlplane.api.dto.CreateTestRequest;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
+import com.netverify.controlplane.execution.RunExecutionService;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.InMemoryRunLifecycleStore;
 import com.netverify.controlplane.persistence.InMemoryTestRepository;
@@ -47,7 +48,7 @@ class TestDefinitionServiceTest {
         service = new TestService(
                 testRepository,
                 lifecycle,
-                bridge,
+                new RunExecutionService(bridge),
                 new SynchronousExecutor()
         );
     }
@@ -175,7 +176,7 @@ class TestDefinitionServiceTest {
         TestService queuedService = new TestService(
                 testRepository,
                 lifecycle,
-                bridge,
+                new RunExecutionService(bridge),
                 task -> { /* never run */ }
         );
         UUID id = createWith(queuedService, "q2", "basic_ping_pong", 3, null).getId();

@@ -25,7 +25,8 @@ public class JdbcTestRunRepository implements TestRunRepository {
     private static final String SELECT_COLUMNS = """
             id, test_id, status, queued_at, started_at, finished_at,
             exit_code, failure_category, stdout, stderr,
-            runner_result::text AS runner_result
+            runner_result::text AS runner_result,
+            worker_id, lease_expires_at
             """;
 
     private final JdbcTemplate jdbcTemplate;
@@ -46,7 +47,9 @@ public class JdbcTestRunRepository implements TestRunRepository {
                 toFailureCategory(rs.getString("failure_category")),
                 rs.getString("stdout"),
                 rs.getString("stderr"),
-                readRunnerResult(rs.getString("runner_result"))
+                readRunnerResult(rs.getString("runner_result")),
+                rs.getString("worker_id"),
+                toInstant(rs.getTimestamp("lease_expires_at"))
         );
     }
 

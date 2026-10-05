@@ -18,6 +18,7 @@ import com.netverify.controlplane.api.dto.RunSummaryDto;
 import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
+import com.netverify.controlplane.execution.RunExecutionService;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.InMemoryRunLifecycleStore;
 import com.netverify.controlplane.persistence.InMemoryTestRepository;
@@ -343,7 +344,7 @@ class TestServiceRunTest {
     }
 
     private TestService serviceWith(RunnerTaskExecutor executor) {
-        return new TestService(testRepository, lifecycle, bridge, executor);
+        return new TestService(testRepository, lifecycle, new RunExecutionService(bridge), executor);
     }
 
     private static UUID createTest(

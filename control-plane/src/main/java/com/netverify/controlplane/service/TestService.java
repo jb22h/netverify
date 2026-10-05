@@ -6,6 +6,7 @@ import com.netverify.controlplane.domain.AllowedScenarios;
 import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
+import com.netverify.controlplane.execution.RunExecutionService;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.QueueRunResult;
 import com.netverify.controlplane.persistence.RunLifecycleStore;
@@ -13,8 +14,6 @@ import com.netverify.controlplane.persistence.RunSnapshot;
 import com.netverify.controlplane.persistence.TerminalUpdate;
 import com.netverify.controlplane.persistence.TestEntity;
 import com.netverify.controlplane.persistence.TestRepository;
-import com.netverify.controlplane.runner.PythonRunOutcome;
-import com.netverify.controlplane.runner.PythonRunnerBridge;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -31,18 +30,18 @@ public class TestService {
 
     private final TestRepository testRepository;
     private final RunLifecycleStore lifecycle;
-    private final PythonRunnerBridge runnerBridge;
+    private final RunExecutionService runExecutionService;
     private final RunnerTaskExecutor executor;
 
     public TestService(
             TestRepository testRepository,
             RunLifecycleStore lifecycle,
-            PythonRunnerBridge runnerBridge,
+            RunExecutionService runExecutionService,
             RunnerTaskExecutor executor
     ) {
         this.testRepository = testRepository;
         this.lifecycle = lifecycle;
-        this.runnerBridge = runnerBridge;
+        this.runExecutionService = runExecutionService;
         this.executor = executor;
     }
 
@@ -186,18 +185,10 @@ public class TestService {
                 return;
             }
 
-            PythonRunOutcome outcome;
-            try {
-                outcome = runnerBridge.run(
-                        entity.scenario(), entity.count(), entity.clients()
-                );
-            } catch (RuntimeException ex) {
-                log.warn("runner bridge failed for test {}", testId, ex);
-                outcome = PythonRunOutcome.preLaunchFailure(
-                        FailureCategory.LAUNCH, "unexpected runner error: " + ex
-                );
-            }
-            lifecycle.tryComplete(testId, runId, toTerminalUpdate(outcome), Instant.now());
+            TerminalUpdate update = runExecutionService.execute(
+                    entity.scenario(), entity.count(), entity.clients()
+            );
+            lifecycle.tryComplete(testId, runId, update, Instant.now());
         } catch (RuntimeException ex) {
             log.error("unexpected worker failure for test {}", testId, ex);
             lifecycle.tryComplete(
@@ -246,26 +237,6 @@ public class TestService {
                 entity.count(),
                 entity.clients(),
                 entity.createdAt()
-        );
-    }
-
-    private static TerminalUpdate toTerminalUpdate(PythonRunOutcome outcome) {
-        String stderr = outcome.stderr() == null ? "" : outcome.stderr();
-        if (outcome.message() != null && !outcome.message().isBlank()) {
-            stderr = stderr.isBlank() ? outcome.message() : stderr + System.lineSeparator()
-                    + outcome.message();
-        }
-        if (outcome.terminalStatus() == TestStatus.PASSED) {
-            return TerminalUpdate.passed(
-                    outcome.exitCode(), outcome.runnerResult(), outcome.stdout(), stderr
-            );
-        }
-        return TerminalUpdate.failed(
-                outcome.failureCategory() == null ? FailureCategory.LAUNCH : outcome.failureCategory(),
-                outcome.exitCode(),
-                outcome.runnerResult(),
-                outcome.stdout(),
-                stderr
         );
     }
 

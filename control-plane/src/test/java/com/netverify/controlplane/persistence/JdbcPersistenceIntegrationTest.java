@@ -127,7 +127,9 @@ class JdbcPersistenceIntegrationTest {
                 null,
                 "{\"ok\":true}",
                 "",
-                result
+                result,
+                null,
+                null
         );
 
         testRunRepository.insert(written);
@@ -178,6 +180,8 @@ class JdbcPersistenceIntegrationTest {
                 null,
                 null,
                 null,
+                null,
+                null,
                 null
         );
 
@@ -202,6 +206,8 @@ class JdbcPersistenceIntegrationTest {
                 UUID.randomUUID(),
                 TestStatus.QUEUED,
                 Instant.now(),
+                null,
+                null,
                 null,
                 null,
                 null,
@@ -233,6 +239,8 @@ class JdbcPersistenceIntegrationTest {
                 null,
                 null,
                 null,
+                null,
+                null,
                 null
         ));
 
@@ -241,6 +249,8 @@ class JdbcPersistenceIntegrationTest {
                 testId,
                 TestStatus.QUEUED,
                 Instant.now(),
+                null,
+                null,
                 null,
                 null,
                 null,
@@ -282,6 +292,8 @@ class JdbcPersistenceIntegrationTest {
                 null,
                 null,
                 null,
+                null,
+                null,
                 null
         ));
 
@@ -292,6 +304,8 @@ class JdbcPersistenceIntegrationTest {
                         testId,
                         TestStatus.QUEUED,
                         Instant.now(),
+                        null,
+                        null,
                         null,
                         null,
                         null,
@@ -323,7 +337,9 @@ class JdbcPersistenceIntegrationTest {
                 "boom",
                 new RunnerResultDto(
                         "basic_ping_pong", false, List.of("boom"), 1, 0.01, Map.of()
-                )
+                ),
+                null,
+                null
         ));
 
         UUID secondId = UUID.randomUUID();
@@ -332,6 +348,8 @@ class JdbcPersistenceIntegrationTest {
                 testId,
                 TestStatus.QUEUED,
                 Instant.now(),
+                null,
+                null,
                 null,
                 null,
                 null,

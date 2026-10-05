@@ -18,6 +18,8 @@ public record TestRunEntity(
         FailureCategory failureCategory,
         String stdout,
         String stderr,
-        RunnerResultDto runnerResult
+        RunnerResultDto runnerResult,
+        String workerId,
+        Instant leaseExpiresAt
 ) {
 }

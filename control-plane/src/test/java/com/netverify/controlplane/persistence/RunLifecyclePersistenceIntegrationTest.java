@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 import com.netverify.controlplane.config.ActiveRunRecovery;
 import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestStatus;
+import com.netverify.controlplane.execution.RunExecutionService;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.jdbc.JdbcRunLifecycleStore;
 import com.netverify.controlplane.runner.PythonRunOutcome;
@@ -145,7 +146,7 @@ class RunLifecyclePersistenceIntegrationTest {
         TestService service = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                bridge,
+                new RunExecutionService(bridge),
                 blockingExecutor
         );
 
@@ -231,7 +232,7 @@ class RunLifecyclePersistenceIntegrationTest {
         TestService service = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                mock(PythonRunnerBridge.class),
+                new RunExecutionService(mock(PythonRunnerBridge.class)),
                 rejecting
         );
 
@@ -264,7 +265,7 @@ class RunLifecyclePersistenceIntegrationTest {
         TestService retry = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                bridge,
+                new RunExecutionService(bridge),
                 Runnable::run
         );
         retry.runTest(def.id());
@@ -279,11 +280,11 @@ class RunLifecyclePersistenceIntegrationTest {
 
         testRunRepository.insert(new TestRunEntity(
                 tie.low(), def.id(), TestStatus.PASSED, same, same, same,
-                0, null, "low", "", null
+                0, null, "low", "", null, null, null
         ));
         testRunRepository.insert(new TestRunEntity(
                 tie.high(), def.id(), TestStatus.PASSED, same, same, same,
-                0, null, "high", "", null
+                0, null, "high", "", null, null, null
         ));
 
         TestRunEntity latest = testRunRepository.findLatestByTestId(def.id()).orElseThrow();
@@ -324,7 +325,7 @@ class RunLifecyclePersistenceIntegrationTest {
         TestService service = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                bridge,
+                new RunExecutionService(bridge),
                 Runnable::run
         );
         service.runTest(def.id());
@@ -360,14 +361,14 @@ class RunLifecyclePersistenceIntegrationTest {
         new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                bridge,
+                new RunExecutionService(bridge),
                 Runnable::run
         ).runTest(def.id());
 
         TestService cold = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                mock(PythonRunnerBridge.class),
+                new RunExecutionService(mock(PythonRunnerBridge.class)),
                 Runnable::run
         );
         assertEquals(TestStatus.PASSED, cold.getTerminalTest(def.id()).getStatus());
@@ -395,7 +396,7 @@ class RunLifecyclePersistenceIntegrationTest {
         TestService service = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                bridge,
+                new RunExecutionService(bridge),
                 Runnable::run
         );
         service.runTest(def.id());
@@ -470,7 +471,7 @@ class RunLifecyclePersistenceIntegrationTest {
         TestService first = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                bridge,
+                new RunExecutionService(bridge),
                 Runnable::run
         );
         first.runTest(def.id());
@@ -479,7 +480,7 @@ class RunLifecyclePersistenceIntegrationTest {
         TestService cold = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                mock(PythonRunnerBridge.class),
+                new RunExecutionService(mock(PythonRunnerBridge.class)),
                 Runnable::run
         );
         assertEquals(2, cold.listRuns(def.id()).size());
@@ -494,7 +495,7 @@ class RunLifecyclePersistenceIntegrationTest {
         TestService rejecting = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                mock(PythonRunnerBridge.class),
+                new RunExecutionService(mock(PythonRunnerBridge.class)),
                 task -> {
                     throw new RejectedExecutionException("full");
                 }
@@ -515,7 +516,7 @@ class RunLifecyclePersistenceIntegrationTest {
         TestService cold = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                mock(PythonRunnerBridge.class),
+                new RunExecutionService(mock(PythonRunnerBridge.class)),
                 Runnable::run
         );
         List<com.netverify.controlplane.api.dto.RunSummaryDto> history = cold.listRuns(def.id());
@@ -540,6 +541,8 @@ class RunLifecyclePersistenceIntegrationTest {
                 null,
                 stdout,
                 "",
+                null,
+                null,
                 null
         ));
     }

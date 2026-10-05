@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 import com.netverify.controlplane.api.dto.CreateTestRequest;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
+import com.netverify.controlplane.execution.RunExecutionService;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.jdbc.JdbcRunLifecycleStore;
 import com.netverify.controlplane.runner.PythonRunOutcome;
@@ -84,7 +85,7 @@ class TestDefinitionPersistenceIntegrationTest {
         TestService service = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                mock(PythonRunnerBridge.class),
+                new RunExecutionService(mock(PythonRunnerBridge.class)),
                 Runnable::run
         );
 
@@ -116,7 +117,7 @@ class TestDefinitionPersistenceIntegrationTest {
         TestService service = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                bridge,
+                new RunExecutionService(bridge),
                 executor
         );
 
@@ -136,7 +137,7 @@ class TestDefinitionPersistenceIntegrationTest {
         TestService service = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                mock(PythonRunnerBridge.class),
+                new RunExecutionService(mock(PythonRunnerBridge.class)),
                 Runnable::run
         );
         CreateTestRequest request = new CreateTestRequest();
