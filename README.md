@@ -15,15 +15,18 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 8** — Java Spring Boot Control Plane: complete
 - **Phase 9** — PostgreSQL Persistence: complete
 - **Phase 10** — Queue and Distributed Workers: complete
+- **Phase 11** — Docker: complete
 
-**Current phase:** Phase 10 — Queue and Distributed Workers: complete
-**Next phase:** Phase 11 — Docker
+**Current phase:** Phase 11 — Docker: complete
+**Next phase:** Phase 12 — React / TypeScript Dashboard
 
 Phase 8 adds a Java 21 / Maven / Spring Boot control plane under `control-plane/`. Tests are created and started over HTTP; a bounded Java executor launches `automation/runner.py --json` via `ProcessBuilder`, which drives the existing C `net_server` / `net_client`.
 
 Phase 9 adds optional PostgreSQL durability (`postgres` Spring profile): immutable definitions in `tests`, every execution in `test_runs`, and `GET /api/tests/{id}/runs` history. The default profile remains completely DB-free (`InMemoryTestRepository` + `InMemoryRunLifecycleStore`).
 
-Phase 10 adds optional distributed execution: the same Spring Boot JAR runs as either an HTTP **API** process or a headless **worker** process. PostgreSQL remains authoritative for run state and lease fencing; Redis Streams is transport only (at-least-once delivery). Docker, React, and AWS remain later phases.
+Phase 10 adds optional distributed execution: the same Spring Boot JAR runs as either an HTTP **API** process or a headless **worker** process. PostgreSQL remains authoritative for run state and lease fencing; Redis Streams is transport only (at-least-once delivery).
+
+Phase 11 packages that distributed stack in Docker: one application image for API and worker roles, plus official PostgreSQL and Redis Compose services. React and AWS remain later phases.
 
 HTTP scenarios: `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, `concurrent_load`. `latency_injection` is intentionally not exposed (requires privileged `tc`/`netem`).
 
@@ -44,6 +47,9 @@ netverify/
 │   │   └── client.c
 │   └── server/
 │       └── server.c
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
 ├── Makefile
 ├── PROJECT_SPEC.md
 └── README.md
@@ -203,7 +209,7 @@ Duplicate Redis delivery is possible; PG fencing prevents a second effective exe
 | **D** | Multiple healthy workers | Shared consumer group; distinct worker IDs; PG fencing blocks duplicate execution of the same run |
 | **E** | Worker restart | Restart does not bypass a still-valid PG lease; terminal/redelivery follow PG state |
 
-**Accepted Phase 10 boundaries** (deliberate scope, not hidden bugs): DB→Redis is a dual write (no transactional outbox); crash after PG `QUEUED` before Redis publish can leave an orphan `QUEUED` row; no stale-QUEUED republisher; no DB-wide lease sweeper; `RUNNING_WITHOUT_LEASE` not auto-repaired; externally lost Redis messages not reconstructed; expired `RUNNING` is terminal `TIMEOUT` not retry; batch size remains 1; postgres-only cancel-all recovery stays single-instance; Docker/React/AWS are later phases. Full detail in [PROJECT_SPEC.md](PROJECT_SPEC.md) Phase 10.
+**Accepted Phase 10 boundaries** (deliberate scope, not hidden bugs): DB→Redis is a dual write (no transactional outbox); crash after PG `QUEUED` before Redis publish can leave an orphan `QUEUED` row; no stale-QUEUED republisher; no DB-wide lease sweeper; `RUNNING_WITHOUT_LEASE` not auto-repaired; externally lost Redis messages not reconstructed; expired `RUNNING` is terminal `TIMEOUT` not retry; batch size remains 1; postgres-only cancel-all recovery stays single-instance. React/AWS are later phases. Full detail in [PROJECT_SPEC.md](PROJECT_SPEC.md) Phase 10. Docker packaging is Phase 11 (below).
 
 ### Distributed launch
 
@@ -268,7 +274,7 @@ mvn test
 
 Default `mvn test` stays DB/Redis-free; opt-in ITs skip cleanly without env. Notable Phase 10 tests: `WorkerCrashRecoveryIntegrationTest` (crash windows A/B/C), `WorkerMultiWorkerIntegrationTest` (multi-worker D + restart E), `WorkerRunLifecycleIntegrationTest` (PG claim/lease/fencing), `RedisRunQueueIntegrationTest` (stream/group/XAUTOCLAIM).
 
-Verified real distributed smoke (M3): API queued a run while the worker was offline; a later worker consumed the Redis message; Python/C ran only in the worker; PostgreSQL reached a terminal result; worker restart did not duplicate an already-terminal run.
+Verified real distributed smoke (Phase 10 M3): API queued a run while the worker was offline; a later worker consumed the Redis message; Python/C ran only in the worker; PostgreSQL reached a terminal result; worker restart did not duplicate an already-terminal run.
 
 Minimal curl flow (server on port 8080):
 
@@ -289,6 +295,62 @@ curl -s http://localhost:8080/api/tests/<id>/results
 curl -s http://localhost:8080/api/tests/<id>/metrics
 curl -s http://localhost:8080/api/tests/<id>/logs
 ```
+
+## Docker (Phase 11)
+
+Phase 11 makes the Phase 10 distributed stack reproducible with Docker Compose. Phase 10 semantics are unchanged: Redis is at-least-once transport; PostgreSQL is authoritative state and execution ownership; there is no generic exactly-once guarantee, no transactional outbox, and no stale-`QUEUED` republisher. Expired `RUNNING` still becomes `FAILED` / `TIMEOUT`.
+
+### Architecture
+
+```text
+HTTP client
+    → api container          (same app image, role=api)
+    → PostgreSQL + Redis     (official images: postgres:18, redis:8)
+    → worker container       (same app image, role=worker)
+    → Python runner
+    → C net_server / net_client
+```
+
+- **API** and **worker** are separate containers/processes using the **same** NetVerify application image (`Dockerfile` → `netverify-app:local`) with different runtime roles/config.
+- PostgreSQL and Redis are separate official containers. Cross-container deps use Compose DNS names `postgres` / `redis` — **never** `localhost`.
+- The worker image layout includes `automation/runner.py`, `net_server`, and `net_client` at `NETVERIFY_REPO_ROOT=/opt/netverify` (worker only; API does not execute Python).
+
+Milestones: **M1** application image; **M2** Compose stack (`postgres`, `redis`, `api`, `worker`); **M3** optional `worker-2` + real Docker verification.
+
+### Developer workflow
+
+Copy `.env.example` to a local `.env` (gitignored). Never commit a real `.env` or DB password.
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+docker compose ps
+docker compose logs -f api worker
+docker compose down
+```
+
+- `docker compose down` removes containers and the Compose network but **preserves** the named PostgreSQL volume (`netverify-postgres-data`).
+- `docker compose down -v` intentionally deletes that volume (destructive).
+
+Default stack: `postgres` + `redis` + `api` (`:8080`) + one worker (`NETVERIFY_WORKER_ID=worker-1`).
+
+### Optional second worker
+
+Worker IDs are part of PostgreSQL lease ownership and Redis consumer identity, so blind `compose scale` with one shared fixed worker ID is unsafe. Use the explicit `worker-2` service behind the Compose profile `multiworker`:
+
+```bash
+docker compose --profile multiworker up -d worker-2
+```
+
+### Verified Docker smoke
+
+Real verification completed on this stack:
+
+1. Default stack healthy: postgres, redis, api on `:8080`, headless `worker-1`.
+2. HTTP `basic_ping_pong`: create → `QUEUED` → `PASSED`, `exitCode=0`, runner metrics present; PostgreSQL `worker_id=worker-1`, `lease_expires_at` cleared.
+3. Restart `worker-1`: still exactly one `test_run` (same run UUID), still `PASSED` — no duplicate execution.
+4. Multi-worker: stop `worker-1`, start `worker-2` via `--profile multiworker`; new `basic_ping_pong` → `PASSED` with PostgreSQL `worker_id=worker-2`, lease cleared.
+5. `docker compose down` preserves `netverify_netverify-postgres-data`.
 
 ## Clean
 

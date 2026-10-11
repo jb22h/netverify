@@ -872,32 +872,81 @@ Definition of Done:
 ---
 
 ## Phase 11 — Docker
-Goal: Make test environments reproducible.
+Goal: Make the Phase 10 distributed stack reproducible with Docker while preserving Phase 10 behavior.
 
-**Status: NOT STARTED**
+**Status: COMPLETE**
 
-Containerize:
-- client
-- server
-- Java backend
-- PostgreSQL
-- Redis
+### Design choices
 
-Potential Docker Compose services:
-- backend
-- postgres
-- redis
-- worker
-- test-server
-- test-client
+- One **application image** (multi-stage `Dockerfile`) for both API and worker roles; Compose supplies different command/env.
+- Official **`postgres:18`** and **`redis:8`** services; C binaries are **not** separate Compose services — they live inside the worker image and are spawned by `automation/runner.py`.
+- Phase 10 semantics unchanged: Redis = at-least-once transport; PostgreSQL = authoritative state / execution ownership; no generic exactly-once; no transactional outbox; no stale-`QUEUED` republisher; expired `RUNNING` → `FAILED`/`TIMEOUT`.
+
+### Docker architecture
+
+```text
+HTTP client
+    → api container          (netverify-app image, role=api)
+    → PostgreSQL + Redis     (postgres / redis service DNS)
+    → worker container       (same image, role=worker)
+    → Python runner
+    → C net_server / net_client
+```
+
+| Service | Image | Notes |
+|---------|-------|-------|
+| `postgres` | `postgres:18` | Named volume `netverify-postgres-data`; `pg_isready` healthcheck |
+| `redis` | `redis:8` | `redis-cli ping` healthcheck; no persistence required in Phase 11 |
+| `api` | `netverify-app:local` (build `.`) | `postgres,redis`, `role=api`, host `:8080`; no `NETVERIFY_REPO_ROOT` |
+| `worker` | same app image | `role=worker`, web=none, `NETVERIFY_WORKER_ID=worker-1`, `NETVERIFY_REPO_ROOT=/opt/netverify` |
+| `worker-2` | same app image | Optional; Compose profile `multiworker`; distinct `NETVERIFY_WORKER_ID=worker-2` |
+
+In-image worker layout: `/opt/netverify/{automation/,net_server,net_client,app.jar}`. Cross-container deps use hostnames `postgres` / `redis` — never `localhost`.
+
+### Milestone summary (M1–M3)
+
+- **M1** — Application image: multi-stage build (C via `Makefile`, Maven fat JAR, Jammy-aligned glibc); JRE 21 + `python3`; non-root user; exec-form Java `ENTRYPOINT`
+- **M2** — Compose stack: postgres/redis/api/worker; healthchecks + `depends_on: service_healthy`; `.env.example`; `.env` gitignored
+- **M3** — Optional `worker-2` behind profile `multiworker` + real Docker verification (below)
+
+### Developer workflow
+
+```bash
+cp .env.example .env          # never commit real .env / passwords
+docker compose up --build -d
+docker compose ps
+docker compose logs -f api worker
+docker compose down           # keeps PostgreSQL named volume
+# docker compose down -v      # intentionally deletes the volume
+```
+
+Optional second worker (explicit service — not blind `scale`; worker IDs are PG lease owners and Redis consumer names):
+
+```bash
+docker compose --profile multiworker up -d worker-2
+```
+
+### Verified Docker smoke
+
+1. Default stack: healthy postgres/redis; api on `:8080`; headless `worker-1`
+2. HTTP `basic_ping_pong`: create → `QUEUED` → `PASSED`, `exitCode=0`, runner metrics; PG `worker_id=worker-1`, `lease_expires_at` cleared
+3. Restart `worker-1`: still one `test_run` (same UUID), still `PASSED` — no duplicate
+4. Multi-worker: stop `worker-1`, start `worker-2` via profile; new run `PASSED` with `worker_id=worker-2`
+5. `docker compose down` preserves volume `netverify_netverify-postgres-data`
 
 Definition of Done:
-- A new machine can start the system using documented Docker commands.
+- ✅ A new machine can start the system using documented Docker commands.
+- ✅ Same application image runs API and worker with role-specific Compose config.
+- ✅ Real Docker smoke (create/run/terminal, worker restart, optional worker-2) verified.
+- ✅ Phase 10 queue/lease semantics preserved; React/AWS not started.
 
 ---
 
 ## Phase 12 — React + TypeScript Dashboard
 Goal: Visualize the system.
+
+**Status: NOT STARTED**
+
 
 Pages:
 
@@ -1158,7 +1207,7 @@ Short version:
 
 Longer version:
 
-> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs with optional PostgreSQL durability for definitions, run history, and results. Optional Redis Streams deliver work to separate worker processes; PostgreSQL remains authoritative for execution ownership and lease fencing. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
+> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs with optional PostgreSQL durability for definitions, run history, and results. Optional Redis Streams deliver work to separate worker processes; PostgreSQL remains authoritative for execution ownership and lease fencing. Docker Compose reproduces the distributed API/worker stack with official PostgreSQL and Redis. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
 
 ---
 
@@ -1207,7 +1256,7 @@ I am building a portfolio project called NetVerify.
 
 Read PROJECT_SPEC.md before doing anything.
 
-NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (optional PostgreSQL persistence for definitions and run history; optional Redis Streams + distributed API/worker roles). Docker, React/TypeScript dashboard, and AWS come later.
+NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (optional PostgreSQL persistence for definitions and run history; optional Redis Streams + distributed API/worker roles; Docker Compose for the reproducible stack). React/TypeScript dashboard and AWS come later.
 
 This is an educational Software Engineering project. Do not build the whole project for me. Work one milestone at a time, explain architectural decisions, and make sure I can understand and explain the code in an interview.
 
@@ -1229,10 +1278,10 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 10 — Queue and Distributed Workers (COMPLETE)`
+`Phase 11 — Docker (COMPLETE)`
 
 Next phase:
-`Phase 11 — Docker (NOT STARTED)`
+`Phase 12 — React + TypeScript Dashboard (NOT STARTED)`
 
 Completed:
 
@@ -1499,12 +1548,27 @@ Completed:
 - Accepted boundaries: dual-write DB→Redis (no outbox); orphan QUEUED
   possible; no stale-QUEUED republisher; no DB-wide sweeper;
   RUNNING_WITHOUT_LEASE not auto-repaired; lost Redis messages not
-  reconstructed; Docker/React/AWS remain later
+  reconstructed; React/AWS remain later (Docker is Phase 11)
 - Verified real M3 smoke: queue while worker offline; later consume;
   terminal result; restart did not duplicate terminal run
 
+**Phase 11 — Docker**
+- COMPLETE (M1–M3)
+- M1: multi-stage application image (Makefile C build + Maven JAR +
+  Jammy JRE/python3); `/opt/netverify` layout; non-root; exec-form
+  Java ENTRYPOINT; same image for api and worker roles
+- M2: Compose `postgres:18`, `redis:8`, `api`, `worker`; healthchecks +
+  `depends_on: service_healthy`; named volume; `.env.example`;
+  `.env` gitignored; service DNS `postgres`/`redis`
+- M3: optional `worker-2` behind profile `multiworker` (distinct
+  worker IDs; no blind scale); real Docker smoke verified
+- Verified: default stack healthy; HTTP basic_ping_pong → PASSED on
+  worker-1; worker-1 restart no duplicate run; worker-2 PASSED with
+  ownership worker-2; `compose down` keeps PG volume
+- Phase 10 lease/queue semantics preserved inside containers
+
 Next:
-- Begin Phase 11 — Docker
+- Begin Phase 12 — React + TypeScript Dashboard
 
 Last updated:
 2026-10-11
