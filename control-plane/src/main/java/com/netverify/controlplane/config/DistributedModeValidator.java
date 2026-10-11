@@ -10,8 +10,9 @@ import org.springframework.util.StringUtils;
 /**
  * Fail-fast validation of {@code netverify.role} against active profiles.
  *
- * <p>Producer/gating slice: {@code role=worker} is rejected until the worker-consumer
- * slice lands. {@code postgres}+{@code redis} requires {@code role=api}.
+ * <p>{@code postgres}+{@code redis} requires {@code role=api} or {@code role=worker}.
+ * Worker mode also requires a nonblank {@code netverify.worker-id} and
+ * {@code spring.main.web-application-type=none}.
  */
 @Configuration
 public class DistributedModeValidator {
@@ -26,17 +27,33 @@ public class DistributedModeValidator {
         if (!StringUtils.hasText(role)) {
             if (postgres && redis) {
                 throw new IllegalStateException(
-                        "Profiles 'postgres' and 'redis' together require netverify.role=api. "
-                                + "Worker role is not enabled until the M3 worker-consumer slice."
+                        "Profiles 'postgres' and 'redis' together require netverify.role=api "
+                                + "or netverify.role=worker"
                 );
             }
             return;
         }
 
         if ("worker".equals(role)) {
-            throw new IllegalStateException(
-                    "worker role is not enabled until the M3 worker runtime slice"
-            );
+            if (!postgres || !redis) {
+                throw new IllegalStateException(
+                        "netverify.role=worker requires both 'postgres' and 'redis' profiles"
+                );
+            }
+            String workerId = environment.getProperty("netverify.worker-id", "");
+            workerId = workerId == null ? "" : workerId.trim();
+            if (!StringUtils.hasText(workerId)) {
+                throw new IllegalStateException(
+                        "netverify.role=worker requires netverify.worker-id"
+                );
+            }
+            String webType = environment.getProperty("spring.main.web-application-type");
+            if (webType == null || !"none".equalsIgnoreCase(webType.trim())) {
+                throw new IllegalStateException(
+                        "netverify.role=worker requires spring.main.web-application-type=none"
+                );
+            }
+            return;
         }
 
         if ("api".equals(role)) {

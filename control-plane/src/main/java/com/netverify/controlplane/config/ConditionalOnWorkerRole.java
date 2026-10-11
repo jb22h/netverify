@@ -9,7 +9,7 @@ import org.springframework.context.annotation.Conditional;
 
 /**
  * Registers a bean only when postgres+redis profiles are active and
- * {@code netverify.role=worker}. Does not override {@link DistributedModeValidator}.
+ * {@code netverify.role=worker}.
  */
 @Target({ElementType.TYPE, ElementType.METHOD})
 @Retention(RetentionPolicy.RUNTIME)

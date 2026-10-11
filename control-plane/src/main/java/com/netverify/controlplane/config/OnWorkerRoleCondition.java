@@ -10,8 +10,7 @@ import org.springframework.core.type.AnnotatedTypeMetadata;
 /**
  * Bean-condition primitive: true only for postgres+redis with {@code netverify.role=worker}.
  *
- * <p>Does not authorize full application startup — {@link DistributedModeValidator}
- * still rejects worker role until the worker runtime slice.
+ * <p>Full startup still requires {@link DistributedModeValidator} (worker-id and web-none).
  */
 public final class OnWorkerRoleCondition implements Condition {
 

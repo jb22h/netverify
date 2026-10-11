@@ -19,14 +19,13 @@ public class NetVerifyProperties {
     private String pythonCommand = "python3";
 
     /**
-     * Process role: blank (local/default), {@code api}, or {@code worker}
-     * (worker rejected until the consumer slice).
+     * Process role: blank (local/default), {@code api}, or {@code worker}.
      */
     private String role = "";
 
     /**
-     * Stable worker identity for leases and consumer naming.
-     * Bound from {@code NETVERIFY_WORKER_ID}; not validated until worker runtime is enabled.
+     * Stable worker identity for leases and Redis consumer naming.
+     * Bound from {@code NETVERIFY_WORKER_ID}; required when {@code role=worker}.
      */
     private String workerId = "";
 
