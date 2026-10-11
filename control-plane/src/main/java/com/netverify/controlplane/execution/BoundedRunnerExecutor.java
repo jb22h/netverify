@@ -18,6 +18,7 @@ import org.springframework.stereotype.Component;
  * {@code Executors.newFixedThreadPool}, whose queue is unbounded.
  */
 @Component
+@ConditionalOnLocalRunDispatcher
 public class BoundedRunnerExecutor implements RunnerTaskExecutor {
 
     static final int WORKERS = 2;

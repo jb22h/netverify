@@ -10,6 +10,8 @@ import static org.mockito.Mockito.when;
 import com.netverify.controlplane.api.dto.CreateTestRequest;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
+import com.netverify.controlplane.execution.LocalRunDispatcher;
+import com.netverify.controlplane.execution.LocalRunExecutionCoordinator;
 import com.netverify.controlplane.execution.RunExecutionService;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.jdbc.JdbcRunLifecycleStore;
@@ -82,10 +84,10 @@ class TestDefinitionPersistenceIntegrationTest {
                 id, "durable", "basic_ping_pong", 4, null, Instant.now()
         ));
 
-        TestService service = new TestService(
+        TestService service = localTestService(
                 testRepository,
-                new JdbcRunLifecycleStore(testRunRepository),
-                new RunExecutionService(mock(PythonRunnerBridge.class)),
+                testRunRepository,
+                mock(PythonRunnerBridge.class),
                 Runnable::run
         );
 
@@ -117,8 +119,14 @@ class TestDefinitionPersistenceIntegrationTest {
         TestService service = new TestService(
                 testRepository,
                 new JdbcRunLifecycleStore(testRunRepository),
-                new RunExecutionService(bridge),
-                executor
+                new LocalRunDispatcher(
+                        executor,
+                        new LocalRunExecutionCoordinator(
+                                new JdbcRunLifecycleStore(testRunRepository),
+                                testRepository,
+                                new RunExecutionService(bridge)
+                        )
+                )
         );
 
         service.runTest(id);
@@ -134,10 +142,10 @@ class TestDefinitionPersistenceIntegrationTest {
 
     @Test
     void createViaServicePersistsDefinitionWithoutTestRuns() {
-        TestService service = new TestService(
+        TestService service = localTestService(
                 testRepository,
-                new JdbcRunLifecycleStore(testRunRepository),
-                new RunExecutionService(mock(PythonRunnerBridge.class)),
+                testRunRepository,
+                mock(PythonRunnerBridge.class),
                 Runnable::run
         );
         CreateTestRequest request = new CreateTestRequest();
@@ -155,4 +163,24 @@ class TestDefinitionPersistenceIntegrationTest {
         );
         assertEquals(0, runRows);
     }
+
+    private static TestService localTestService(
+            TestRepository testRepository,
+            TestRunRepository testRunRepository,
+            PythonRunnerBridge bridge,
+            RunnerTaskExecutor executor
+    ) {
+        RunLifecycleStore store = new JdbcRunLifecycleStore(testRunRepository);
+        return new TestService(
+                testRepository,
+                store,
+                new LocalRunDispatcher(
+                        executor,
+                        new LocalRunExecutionCoordinator(
+                                store, testRepository, new RunExecutionService(bridge)
+                        )
+                )
+        );
+    }
+
 }

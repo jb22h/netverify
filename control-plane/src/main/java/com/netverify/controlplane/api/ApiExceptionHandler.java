@@ -1,11 +1,12 @@
 package com.netverify.controlplane.api;
 
 import com.netverify.controlplane.api.dto.ErrorResponse;
+import com.netverify.controlplane.execution.DispatchRejectedException;
 import com.netverify.controlplane.service.BadRequestException;
 import com.netverify.controlplane.service.ConflictException;
-import com.netverify.controlplane.service.ExecutorSaturatedException;
 import com.netverify.controlplane.service.NotFoundException;
 import java.util.List;
+import com.netverify.controlplane.config.ConditionalOnApiSurface;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 @RestControllerAdvice
+@ConditionalOnApiSurface
 public class ApiExceptionHandler {
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -49,8 +51,8 @@ public class ApiExceptionHandler {
         return error(HttpStatus.CONFLICT, ex.getMessage(), List.of());
     }
 
-    @ExceptionHandler(ExecutorSaturatedException.class)
-    public ResponseEntity<ErrorResponse> handleSaturated(ExecutorSaturatedException ex) {
+    @ExceptionHandler(DispatchRejectedException.class)
+    public ResponseEntity<ErrorResponse> handleDispatchRejected(DispatchRejectedException ex) {
         return error(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), List.of());
     }
 

@@ -3,6 +3,7 @@ package com.netverify.controlplane.runner;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.netverify.controlplane.domain.FailureCategory;
+import com.netverify.controlplane.execution.ConditionalOnLocalRunDispatcher;
 import org.springframework.stereotype.Component;
 
 /**
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Component;
  * assertions; it only classifies and surfaces them.
  */
 @Component
+@ConditionalOnLocalRunDispatcher
 public class RunnerOutcomeMapper {
 
     static final int EXIT_PASS = 0;

@@ -18,6 +18,9 @@ import com.netverify.controlplane.api.dto.RunSummaryDto;
 import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
+import com.netverify.controlplane.execution.DispatchRejectedException;
+import com.netverify.controlplane.execution.LocalRunDispatcher;
+import com.netverify.controlplane.execution.LocalRunExecutionCoordinator;
 import com.netverify.controlplane.execution.RunExecutionService;
 import com.netverify.controlplane.execution.RunnerTaskExecutor;
 import com.netverify.controlplane.persistence.InMemoryRunLifecycleStore;
@@ -175,7 +178,7 @@ class TestServiceRunTest {
         TestService service = serviceWith(new RejectingExecutor());
         UUID id = createTest(service, "basic_ping_pong", 3, null);
 
-        assertThrows(ExecutorSaturatedException.class, () -> service.runTest(id));
+        assertThrows(DispatchRejectedException.class, () -> service.runTest(id));
 
         TestRecord record = service.getTest(id);
         assertEquals(TestStatus.FAILED, record.getStatus());
@@ -214,7 +217,7 @@ class TestServiceRunTest {
         TestService service = serviceWith(new NoopExecutor());
         UUID id = createTest(service, "basic_ping_pong", 3, null);
 
-        service.executeRun(id, UUID.randomUUID());
+        coordinator().execute(id, UUID.randomUUID());
 
         assertTrue(lifecycle.findLatest(id).isEmpty());
         assertEquals(TestStatus.CREATED, service.getTest(id).getStatus());
@@ -223,9 +226,7 @@ class TestServiceRunTest {
 
     @Test
     void workerIgnoresUnknownId() {
-        TestService service = serviceWith(new NoopExecutor());
-
-        service.executeRun(UUID.randomUUID(), UUID.randomUUID());
+        coordinator().execute(UUID.randomUUID(), UUID.randomUUID());
 
         verifyNoInteractions(bridge);
     }
@@ -343,8 +344,18 @@ class TestServiceRunTest {
         when(bridge.run(any(), anyInt(), any())).thenReturn(outcome);
     }
 
+    private LocalRunExecutionCoordinator coordinator() {
+        return new LocalRunExecutionCoordinator(
+                lifecycle, testRepository, new RunExecutionService(bridge)
+        );
+    }
+
     private TestService serviceWith(RunnerTaskExecutor executor) {
-        return new TestService(testRepository, lifecycle, new RunExecutionService(bridge), executor);
+        return new TestService(
+                testRepository,
+                lifecycle,
+                new LocalRunDispatcher(executor, coordinator())
+        );
     }
 
     private static UUID createTest(

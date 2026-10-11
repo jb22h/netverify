@@ -8,6 +8,7 @@ import com.netverify.controlplane.api.dto.TestMetricsResponse;
 import com.netverify.controlplane.api.dto.TestResponse;
 import com.netverify.controlplane.api.dto.TestResultResponse;
 import com.netverify.controlplane.domain.TestRecord;
+import com.netverify.controlplane.config.ConditionalOnApiSurface;
 import com.netverify.controlplane.service.TestService;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -23,6 +24,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/tests")
+@ConditionalOnApiSurface
 public class TestController {
 
     private final TestService testService;

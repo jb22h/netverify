@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
  * Does not touch lifecycle stores or leases.
  */
 @Service
+@ConditionalOnLocalRunDispatcher
 public class RunExecutionService {
 
     private static final Logger log = LoggerFactory.getLogger(RunExecutionService.class);

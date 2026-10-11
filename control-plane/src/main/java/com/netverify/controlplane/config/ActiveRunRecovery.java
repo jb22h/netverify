@@ -19,7 +19,7 @@ import org.springframework.stereotype.Component;
  * Idempotent: a second call with no active rows updates zero rows.
  */
 @Component
-@Profile("postgres")
+@Profile("postgres & !redis")
 @Order(0)
 public class ActiveRunRecovery implements ApplicationRunner {
 

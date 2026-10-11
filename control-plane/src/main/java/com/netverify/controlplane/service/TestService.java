@@ -2,47 +2,44 @@ package com.netverify.controlplane.service;
 
 import com.netverify.controlplane.api.dto.CreateTestRequest;
 import com.netverify.controlplane.api.dto.RunSummaryDto;
+import com.netverify.controlplane.config.ConditionalOnApiSurface;
 import com.netverify.controlplane.domain.AllowedScenarios;
 import com.netverify.controlplane.domain.FailureCategory;
 import com.netverify.controlplane.domain.TestRecord;
 import com.netverify.controlplane.domain.TestStatus;
-import com.netverify.controlplane.execution.RunExecutionService;
-import com.netverify.controlplane.execution.RunnerTaskExecutor;
+import com.netverify.controlplane.execution.DispatchRejectedException;
+import com.netverify.controlplane.execution.RunDispatcher;
 import com.netverify.controlplane.persistence.QueueRunResult;
 import com.netverify.controlplane.persistence.RunLifecycleStore;
 import com.netverify.controlplane.persistence.RunSnapshot;
-import com.netverify.controlplane.persistence.TerminalUpdate;
 import com.netverify.controlplane.persistence.TestEntity;
 import com.netverify.controlplane.persistence.TestRepository;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.RejectedExecutionException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+/**
+ * HTTP/application orchestration for test definitions and run acceptance.
+ * Local Python execution lives in {@link com.netverify.controlplane.execution.LocalRunExecutionCoordinator}.
+ */
 @Service
+@ConditionalOnApiSurface
 public class TestService {
-
-    private static final Logger log = LoggerFactory.getLogger(TestService.class);
 
     private final TestRepository testRepository;
     private final RunLifecycleStore lifecycle;
-    private final RunExecutionService runExecutionService;
-    private final RunnerTaskExecutor executor;
+    private final RunDispatcher dispatcher;
 
     public TestService(
             TestRepository testRepository,
             RunLifecycleStore lifecycle,
-            RunExecutionService runExecutionService,
-            RunnerTaskExecutor executor
+            RunDispatcher dispatcher
     ) {
         this.testRepository = testRepository;
         this.lifecycle = lifecycle;
-        this.runExecutionService = runExecutionService;
-        this.executor = executor;
+        this.dispatcher = dispatcher;
     }
 
     public TestRecord createTest(CreateTestRequest request) {
@@ -132,7 +129,7 @@ public class TestService {
     }
 
     /**
-     * Queues a run and hands execution to the bounded executor.
+     * Queues a run and hands it to the configured {@link RunDispatcher}.
      *
      * @return test id and accepted queued timestamp (public id remains the test id)
      */
@@ -147,60 +144,18 @@ public class TestService {
         }
 
         try {
-            executor.submit(() -> executeRun(id, runId));
-        } catch (RejectedExecutionException ex) {
+            dispatcher.dispatch(id, runId);
+        } catch (DispatchRejectedException ex) {
             lifecycle.tryFailQueued(
                     id,
                     runId,
                     FailureCategory.LAUNCH,
-                    "runner executor rejected submission: " + ex,
+                    "dispatch rejected: " + ex,
                     Instant.now()
             );
-            throw new ExecutorSaturatedException(
-                    "runner executor is saturated; retry later"
-            );
+            throw ex;
         }
         return new QueuedRun(id, queuedAt);
-    }
-
-    void executeRun(UUID testId, UUID runId) {
-        try {
-            if (!lifecycle.tryStartRunning(testId, runId, Instant.now())) {
-                // State changed underneath us; do not launch Python.
-                return;
-            }
-
-            TestEntity entity = testRepository.findById(testId).orElse(null);
-            if (entity == null) {
-                log.error("definition missing for running test {}", testId);
-                lifecycle.tryComplete(
-                        testId,
-                        runId,
-                        TerminalUpdate.failed(
-                                FailureCategory.LAUNCH, null, null, "",
-                                "test definition missing during run"
-                        ),
-                        Instant.now()
-                );
-                return;
-            }
-
-            TerminalUpdate update = runExecutionService.execute(
-                    entity.scenario(), entity.count(), entity.clients()
-            );
-            lifecycle.tryComplete(testId, runId, update, Instant.now());
-        } catch (RuntimeException ex) {
-            log.error("unexpected worker failure for test {}", testId, ex);
-            lifecycle.tryComplete(
-                    testId,
-                    runId,
-                    TerminalUpdate.failed(
-                            FailureCategory.LAUNCH, null, null, "",
-                            "unexpected worker error: " + ex
-                    ),
-                    Instant.now()
-            );
-        }
     }
 
     private TestEntity requireDefinition(UUID id) {

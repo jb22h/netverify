@@ -233,6 +233,37 @@ class WorkerRunLifecycleIntegrationTest {
     }
 
     @Test
+    void expiredOwnerCannotRenewOrCompleteBeforeReclaim() {
+        TestEntity def = insertDefinition("expired-fence");
+        UUID runId = UUID.randomUUID();
+        testRunRepository.tryInsertQueued(runId, def.id(), Instant.now());
+        assertTrue(workerRunLifecycle.claimForExecution(runId, def.id(), "worker-a", LEASE).claimed());
+
+        expireLease(runId);
+
+        assertFalse(workerRunLifecycle.renewLease(runId, "worker-a", LEASE));
+        assertFalse(workerRunLifecycle.complete(
+                runId,
+                "worker-a",
+                TerminalUpdate.passed(
+                        0,
+                        new RunnerResultDto("basic_ping_pong", true, List.of(), 0, 0.01, Map.of()),
+                        "{}",
+                        ""
+                ),
+                Instant.now()
+        ));
+
+        ReclaimResult reclaim = workerRunLifecycle.reclaimExpiredRunning(runId);
+        assertEquals(ReclaimOutcome.RECLAIMED, reclaim.outcome());
+
+        TestRunEntity row = testRunRepository.findById(runId).orElseThrow();
+        assertEquals(TestStatus.FAILED, row.status());
+        assertEquals(FailureCategory.TIMEOUT, row.failureCategory());
+        assertNull(row.leaseExpiresAt());
+    }
+
+    @Test
     void wrongOwnerCompletionIsRefusedAndRowStaysRunning() {
         TestEntity def = insertDefinition("wrong-owner");
         UUID runId = UUID.randomUUID();

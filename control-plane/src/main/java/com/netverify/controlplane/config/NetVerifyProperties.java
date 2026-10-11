@@ -18,6 +18,12 @@ public class NetVerifyProperties {
     /** Interpreter used to launch the automation runner. */
     private String pythonCommand = "python3";
 
+    /**
+     * Process role: blank (local/default), {@code api}, or {@code worker}
+     * (worker rejected until the consumer slice).
+     */
+    private String role = "";
+
     public String getRepoRoot() {
         return repoRoot;
     }
@@ -40,5 +46,13 @@ public class NetVerifyProperties {
 
     public void setPythonCommand(String pythonCommand) {
         this.pythonCommand = pythonCommand;
+    }
+
+    public String getRole() {
+        return role;
+    }
+
+    public void setRole(String role) {
+        this.role = role;
     }
 }

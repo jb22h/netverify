@@ -37,6 +37,8 @@ public class JdbcWorkerRunLifecycle implements WorkerRunLifecycle {
             WHERE id = ?
               AND status = 'RUNNING'
               AND worker_id = ?
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at > CURRENT_TIMESTAMP
             """;
 
     private static final String COMPLETE_SQL = """
@@ -52,6 +54,8 @@ public class JdbcWorkerRunLifecycle implements WorkerRunLifecycle {
             WHERE id = ?
               AND status = 'RUNNING'
               AND worker_id = ?
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at > CURRENT_TIMESTAMP
             """;
 
     private static final String RECLAIM_SQL = """
