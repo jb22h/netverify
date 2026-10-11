@@ -1,0 +1,33 @@
+.git
+.gitignore
+
+# IDE / editor
+.idea
+.vscode
+*.iml
+.cursor
+.claude
+
+# Host / local build artifacts (rebuild inside Docker)
+/net_server
+/net_client
+*.o
+**/target
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.class
+
+# Local env / secrets / compose (not used in M1 image build)
+.env
+.env.*
+docker-compose*.yml
+docker-compose*.yaml
+
+# Docs and misc (not needed for image build)
+*.md
+docs
+**/.DS_Store
+**/*~
+**/*.swp
+**/*.swo
