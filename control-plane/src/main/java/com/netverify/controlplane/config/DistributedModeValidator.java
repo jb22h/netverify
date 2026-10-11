@@ -35,7 +35,7 @@ public class DistributedModeValidator {
 
         if ("worker".equals(role)) {
             throw new IllegalStateException(
-                    "worker role is not enabled until the M3 worker-consumer slice"
+                    "worker role is not enabled until the M3 worker runtime slice"
             );
         }
 

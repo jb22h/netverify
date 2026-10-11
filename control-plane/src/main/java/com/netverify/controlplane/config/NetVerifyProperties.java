@@ -24,6 +24,12 @@ public class NetVerifyProperties {
      */
     private String role = "";
 
+    /**
+     * Stable worker identity for leases and consumer naming.
+     * Bound from {@code NETVERIFY_WORKER_ID}; not validated until worker runtime is enabled.
+     */
+    private String workerId = "";
+
     public String getRepoRoot() {
         return repoRoot;
     }
@@ -54,5 +60,13 @@ public class NetVerifyProperties {
 
     public void setRole(String role) {
         this.role = role;
+    }
+
+    public String getWorkerId() {
+        return workerId;
+    }
+
+    public void setWorkerId(String workerId) {
+        this.workerId = workerId;
     }
 }

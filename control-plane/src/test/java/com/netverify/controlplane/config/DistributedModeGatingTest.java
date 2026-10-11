@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+import com.netverify.controlplane.execution.BoundedRunnerExecutor;
 import com.netverify.controlplane.execution.LocalRunDispatcher;
 import com.netverify.controlplane.execution.LocalRunExecutionCoordinator;
 import com.netverify.controlplane.execution.RedisRunDispatcher;
@@ -18,6 +19,7 @@ import com.netverify.controlplane.persistence.TestRepository;
 import com.netverify.controlplane.persistence.TestRunRepository;
 import com.netverify.controlplane.queue.RunQueue;
 import com.netverify.controlplane.runner.PythonRunnerBridge;
+import com.netverify.controlplane.runner.RunnerOutcomeMapper;
 import com.netverify.controlplane.service.TestService;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
@@ -104,7 +106,51 @@ class DistributedModeGatingTest {
                 .run(context -> {
                     assertNotNull(context.getStartupFailure());
                     String message = deepest(context.getStartupFailure());
-                    assertTrue(message.contains("worker role is not enabled"), message);
+                    assertTrue(
+                            message.contains(
+                                    "worker role is not enabled until the M3 worker runtime slice"
+                            ),
+                            message
+                    );
+                });
+    }
+
+    @Test
+    void fullWorkerRoleContextStillRejectedByValidator() {
+        new ApplicationContextRunner()
+                .withUserConfiguration(
+                        DistributedModeValidator.class,
+                        LocalRunDispatcher.class,
+                        RedisRunDispatcher.class,
+                        LocalRunExecutionCoordinator.class,
+                        BoundedRunnerExecutor.class,
+                        RunExecutionService.class,
+                        PythonRunnerBridge.class,
+                        RunnerOutcomeMapper.class,
+                        ActiveRunRecovery.class,
+                        TestService.class
+                )
+                .withBean(RunQueue.class, () -> mock(RunQueue.class))
+                .withBean(TestRepository.class, () -> mock(TestRepository.class))
+                .withBean(RunLifecycleStore.class, () -> mock(RunLifecycleStore.class))
+                .withBean(TestRunRepository.class, () -> mock(TestRunRepository.class))
+                .withBean(Flyway.class, () -> mock(Flyway.class))
+                .withBean(com.fasterxml.jackson.databind.ObjectMapper.class,
+                        com.fasterxml.jackson.databind.ObjectMapper::new)
+                .withPropertyValues(
+                        "spring.profiles.active=postgres,redis",
+                        "netverify.role=worker",
+                        "netverify.worker-id=worker-build1"
+                )
+                .run(context -> {
+                    assertNotNull(context.getStartupFailure());
+                    String message = deepest(context.getStartupFailure());
+                    assertTrue(
+                            message.contains(
+                                    "worker role is not enabled until the M3 worker runtime slice"
+                            ),
+                            message
+                    );
                 });
     }
 
@@ -146,12 +192,15 @@ class DistributedModeGatingTest {
                         com.netverify.controlplane.execution.BoundedRunnerExecutor.class,
                         RunExecutionService.class,
                         PythonRunnerBridge.class,
+                        RunnerOutcomeMapper.class,
                         ActiveRunRecovery.class,
                         TestService.class
                 )
                 .withBean(RunQueue.class, () -> mock(RunQueue.class))
                 .withBean(TestRepository.class, () -> mock(TestRepository.class))
                 .withBean(RunLifecycleStore.class, () -> mock(RunLifecycleStore.class))
+                .withBean(com.fasterxml.jackson.databind.ObjectMapper.class,
+                        com.fasterxml.jackson.databind.ObjectMapper::new)
                 .withPropertyValues(
                         "spring.profiles.active=postgres,redis",
                         "netverify.role=api"
@@ -167,6 +216,7 @@ class DistributedModeGatingTest {
                     assertTrue(context.getBeansOfType(RunnerTaskExecutor.class).isEmpty());
                     assertTrue(context.getBeansOfType(RunExecutionService.class).isEmpty());
                     assertTrue(context.getBeansOfType(PythonRunnerBridge.class).isEmpty());
+                    assertTrue(context.getBeansOfType(RunnerOutcomeMapper.class).isEmpty());
                     assertTrue(context.getBeansOfType(ActiveRunRecovery.class).isEmpty());
                 });
     }

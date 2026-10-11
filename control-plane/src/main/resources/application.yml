@@ -6,3 +6,4 @@ netverify:
   runner-timeout-seconds: 120
   python-command: python3
   role: ${NETVERIFY_ROLE:}
+  worker-id: ${NETVERIFY_WORKER_ID:}

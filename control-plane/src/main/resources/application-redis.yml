@@ -7,3 +7,6 @@ netverify:
   queue:
     stream: netverify:runs
     group: netverify-workers
+    read-block-seconds: 2
+    read-batch-size: 1
+    claim-min-idle-seconds: 150

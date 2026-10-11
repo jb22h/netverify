@@ -1,10 +1,11 @@
 package com.netverify.controlplane.queue;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 
 /**
- * Redis-independent queue primitives for Phase 10 M1.
+ * Redis-independent queue primitives for Phase 10.
  * No worker lifecycle, retries, or leases.
  */
 public interface RunQueue {
@@ -21,10 +22,25 @@ public interface RunQueue {
     String publish(UUID runId, UUID testId);
 
     /**
-     * Reads new messages for the given consumer via consumer-group semantics.
+     * Non-blocking read of new messages for the given consumer via consumer-group
+     * semantics. Returns immediately when the stream has nothing new.
      * Malformed payloads throw {@link MalformedQueueMessageException}.
      */
     List<QueueDelivery> read(String consumerName, int count);
+
+    /**
+     * Blocking read of new messages for the given consumer.
+     * {@code block} must be a positive duration (zero/negative rejected).
+     * Malformed payloads throw {@link MalformedQueueMessageException}.
+     */
+    List<QueueDelivery> read(String consumerName, int count, Duration block);
+
+    /**
+     * Claims idle pending messages via XAUTOCLAIM-style semantics.
+     * Deleted-entry ids are omitted from {@link AutoClaimBatch#deliveries()}.
+     * Malformed payloads throw {@link MalformedQueueMessageException}.
+     */
+    AutoClaimBatch claimStale(String consumerName, Duration minIdle, String startId, int count);
 
     /**
      * Acknowledges a previously delivered message.

@@ -17,7 +17,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import com.netverify.controlplane.execution.ConditionalOnLocalRunDispatcher;
+import com.netverify.controlplane.execution.ConditionalOnPythonExecution;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -32,7 +32,7 @@ import org.springframework.stereotype.Component;
  * unconsumed pipes, so a chatty runner cannot deadlock on pipe backpressure.
  */
 @Component
-@ConditionalOnLocalRunDispatcher
+@ConditionalOnPythonExecution
 public class PythonRunnerBridge {
 
     static final int MAX_CAPTURED_BYTES = 1024 * 1024;
