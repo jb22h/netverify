@@ -65,5 +65,32 @@ services:
       redis:
         condition: service_healthy
 
+  # Optional second worker (distinct ID). Not started by default:
+  #   docker compose --profile multiworker up -d worker-2
+  worker-2:
+    profiles:
+      - multiworker
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: netverify-app:local
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres,redis
+      NETVERIFY_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      NETVERIFY_DB_USER: ${POSTGRES_USER}
+      NETVERIFY_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      NETVERIFY_REDIS_HOST: redis
+      NETVERIFY_REDIS_PORT: "6379"
+      NETVERIFY_WORKER_ID: worker-2
+      NETVERIFY_REPO_ROOT: /opt/netverify
+    command:
+      - "--netverify.role=worker"
+      - "--spring.main.web-application-type=none"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   netverify-postgres-data:
