@@ -725,54 +725,156 @@ Definition of Done:
 
 ---
 
-## Phase 10 — Queue and Workers
-Goal: Make test execution asynchronous and scalable.
+## Phase 10 — Queue and Distributed Workers
+Goal: Make test execution asynchronous and scalable across separate API and worker processes.
 
-Architecture:
+**Status: COMPLETE**
+
+### Design rationale
+
+- **Redis Streams** delivers run messages (lightweight, consumer groups, PEL, XAUTOCLAIM).
+- **PostgreSQL** remains authoritative for definitions, lifecycle, results, and **execution ownership** (`worker_id` + lease fencing).
+- Separating transport from ownership avoids treating queue delivery as permission to run Python.
+- Crash semantics are explicit and deterministic; Phase 10 does **not** claim generic exactly-once messaging.
+
+### Distributed architecture
+
 ```text
-Java API
-    |
-    v
-Job Queue
-    |
-    +------+
-    |      |
-    v      v
-Worker 1 Worker 2
-    |      |
-    v      v
-Python test runners
+HTTP client
+    → Spring API process (same JAR, role=api)
+    → PostgreSQL (authoritative state)
+    → Redis Stream (transport: runId + testId)
+    → Spring worker process (same JAR, role=worker, web=none)
+    → Python runner (automation/runner.py)
+    → C net_server / net_client
 ```
 
-Possible technology:
-- Redis-based queue initially
+| Process | Profiles / flags | Responsibilities |
+|---------|------------------|------------------|
+| API | `postgres,redis`, `netverify.role=api`, web enabled | HTTP API; write PG; publish Redis; **never** execute Python |
+| Worker | `postgres,redis`, `netverify.role=worker`, `spring.main.web-application-type=none`, nonblank `NETVERIFY_WORKER_ID` | Consume Redis; PG claim/fence; execute Python/C; no HTTP API |
 
-Concepts:
-- producer
-- consumer
-- retries
-- timeout
-- idempotency
-- duplicate jobs
-- worker crash
-- job ownership
-- dead-letter behavior
-- at-least-once delivery
+Multiple workers share one Redis consumer group and must use **distinct** worker IDs.
 
-Interview questions to be able to answer:
-- What happens if a worker crashes in the middle?
-- How do you prevent the same test from running twice?
-- How do you retry safely?
-- How do you know a worker is alive?
+### Queue message contract
+
+Redis Stream fields (exactly):
+- `runId`
+- `testId`
+
+PostgreSQL stores authoritative test/run state and full terminal result (stdout/stderr/metrics/`failure_category`).
+
+### Delivery / ownership semantics
+
+**Redis (transport):**
+- At-least-once delivery via consumer group / PEL / XAUTOCLAIM
+- Redis consumer ownership does **not** authorize execution
+
+**PostgreSQL (authority):**
+- Successful PG claim authorizes execution
+- `worker_id` + lease fencing (`renew` / `complete` require correct owner, `RUNNING`, non-null unexpired lease)
+- Terminal PG state wins over duplicate or redelivered Redis messages
+
+Accurate guarantee: duplicate Redis delivery is possible; PostgreSQL fencing prevents a second effective execution of the same active run in the verified scenarios.
+
+### Lease model (defaults)
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Initial / renew PG lease horizon | 120 seconds | Claim and heartbeat renewals |
+| Heartbeat interval | 30 seconds | Shared scheduler per worker JVM |
+| Redis XAUTOCLAIM min-idle | 150 seconds | Intentionally **greater than** 120s |
+
+Expired `RUNNING` recovery:
+- Does **not** re-run Python
+- Becomes `FAILED` with `failureCategory=TIMEOUT`
+- Redis message is ACKed after successful reclaim
+
+`RUNNING_WITHOUT_LEASE`: never stolen automatically; no ACK; known unsupported recovery state (not auto-repaired in Phase 10).
+
+### Crash / recovery matrix
+
+| Window | What happens | Outcome |
+|--------|--------------|---------|
+| **A** Redis delivered, die before PG claim | Redis pending; PG still `QUEUED`; later XAUTOCLAIM | New worker PG-claims and executes once |
+| **B** Die after PG claim / during Python | PG stays `RUNNING` while lease valid; peers cannot execute | After expiry + redelivery → reclaim `FAILED`/`TIMEOUT`; no automatic rerun |
+| **C** PG terminal committed, die before Redis ACK | Message stays pending | Redelivery → `ALREADY_TERMINAL` → ACK only; no duplicate execution |
+| **D** Multiple healthy workers | Shared group; distinct worker IDs | Different jobs on different workers; PG fencing blocks concurrent duplicate execution of the same run |
+| **E** Worker restart | Same configured `NETVERIFY_WORKER_ID` may be reused | Restart does **not** bypass a still-valid PG lease; after expiry, reclaim/`TIMEOUT` or follow terminal/redelivery rules |
+
+Verified opt-in ITs: `WorkerCrashRecoveryIntegrationTest` (A/B/C), `WorkerMultiWorkerIntegrationTest` (D1/D2/E), plus `WorkerRunLifecycleIntegrationTest` and `RedisRunQueueIntegrationTest`. Real M3 smoke: API queued while worker offline; later worker consumed; result persisted; restart did not duplicate a terminal run.
+
+### Milestone summary (M1–M4)
+
+- **M1** — Redis Streams queue foundation (`RunQueue`, publish/read/ACK, consumer group)
+- **M2** — Worker PG lease/fencing boundary (`claim` / `renew` / `complete` / `reclaimExpiredRunning`)
+- **M3** — Distributed API + worker runtime (`role=api|worker`, `RedisRunWorker`, `WorkerMessageProcessor`)
+- **M4** — Crash recovery + multi-worker verification (ITs + this documentation)
+
+### Accepted Phase 10 limitations (deliberate scope boundaries)
+
+- DB → Redis is a **dual write**, not transactional
+- Crash after PG `QUEUED` commit but before Redis publish can leave an orphan `QUEUED` run
+- No transactional outbox
+- No stale-`QUEUED` republisher
+- No DB-wide lease sweeper
+- `RUNNING_WITHOUT_LEASE` is not automatically repaired
+- Externally deleted/lost Redis messages are not reconstructed
+- Expired `RUNNING` is terminal `TIMEOUT`, not automatic retry
+- Worker read/claim batch size remains **1**
+- Postgres-only startup cancel-all recovery remains a **single-instance** path (`postgres & !redis`)
+- Docker / React / AWS remain later phases
+
+### Operational launch (placeholders only)
+
+Worker only: `NETVERIFY_REPO_ROOT` must point to the NetVerify repository root containing `automation/runner.py`, `net_server`, and `net_client`.
+
+API:
+```bash
+export NETVERIFY_DB_URL='jdbc:postgresql://HOST:5432/DBNAME'
+export NETVERIFY_DB_USER='...'
+export NETVERIFY_DB_PASSWORD='...'
+export NETVERIFY_REDIS_HOST=localhost
+export NETVERIFY_REDIS_PORT=6379
+cd control-plane
+mvn spring-boot:run \
+  -Dspring-boot.run.profiles=postgres,redis \
+  -Dspring-boot.run.arguments="--netverify.role=api"
+```
+
+Worker:
+```bash
+export NETVERIFY_DB_URL='jdbc:postgresql://HOST:5432/DBNAME'
+export NETVERIFY_DB_USER='...'
+export NETVERIFY_DB_PASSWORD='...'
+export NETVERIFY_REDIS_HOST=localhost
+export NETVERIFY_REDIS_PORT=6379
+export NETVERIFY_WORKER_ID=worker-1
+export NETVERIFY_REPO_ROOT=/path/to/netverify
+cd control-plane
+mvn spring-boot:run \
+  -Dspring-boot.run.profiles=postgres,redis \
+  -Dspring-boot.run.arguments="--netverify.role=worker --spring.main.web-application-type=none --netverify.worker-id=${NETVERIFY_WORKER_ID}"
+```
+
+Interview questions answered by this phase:
+- What happens if a worker crashes in the middle? → Matrix A–E above
+- How do you prevent the same test from running twice? → PG claim/lease fencing (not Redis alone)
+- How do you retry safely? → No automatic TIMEOUT retry in Phase 10; terminal/redelivery follow PG
+- How do you know a worker is alive? → Lease heartbeat renewals (30s / 120s horizon)
 
 Definition of Done:
-- Backend does not block while tests execute.
-- A worker can independently consume and run a test job.
+- ✅ Backend API does not block on Python execution in distributed mode (`role=api`).
+- ✅ A worker can independently consume and run a test job (`role=worker`).
+- ✅ Crash windows A–C and multi-worker/restart D–E verified with opt-in PG+Redis ITs.
+- ✅ Limitations and operational launch commands documented.
 
 ---
 
 ## Phase 11 — Docker
 Goal: Make test environments reproducible.
+
+**Status: NOT STARTED**
 
 Containerize:
 - client
@@ -1056,7 +1158,7 @@ Short version:
 
 Longer version:
 
-> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs with optional PostgreSQL durability for definitions, run history, and results; distributed workers come later. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
+> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs with optional PostgreSQL durability for definitions, run history, and results. Optional Redis Streams deliver work to separate worker processes; PostgreSQL remains authoritative for execution ownership and lease fencing. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
 
 ---
 
@@ -1105,7 +1207,7 @@ I am building a portfolio project called NetVerify.
 
 Read PROJECT_SPEC.md before doing anything.
 
-NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (optional PostgreSQL persistence for definitions and run history). Redis for distributed jobs and a React/TypeScript dashboard come later.
+NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (optional PostgreSQL persistence for definitions and run history; optional Redis Streams + distributed API/worker roles). Docker, React/TypeScript dashboard, and AWS come later.
 
 This is an educational Software Engineering project. Do not build the whole project for me. Work one milestone at a time, explain architectural decisions, and make sure I can understand and explain the code in an interview.
 
@@ -1127,10 +1229,10 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 9 — PostgreSQL Persistence (COMPLETE)`
+`Phase 10 — Queue and Distributed Workers (COMPLETE)`
 
 Next phase:
-`Phase 10 — Queue and Workers (NOT STARTED)`
+`Phase 11 — Docker (NOT STARTED)`
 
 Completed:
 
@@ -1366,21 +1468,46 @@ Completed:
 - Definitions immutable in `tests`; every execution in `test_runs`
   with its own run UUID
 - Lifecycle: QUEUED → RUNNING → PASSED/FAILED; rejection → FAILED/LAUNCH;
-  startup orphan QUEUED/RUNNING → CANCELLED (single-instance)
+  startup orphan QUEUED/RUNNING → CANCELLED (single-instance;
+  disabled when redis profile is active)
 - One active run per test (partial unique index); conditional SQL
 - GET /api/tests/{id}/runs compact newest-first history
   (queued_at DESC, run UUID text DESC); omits logs/result payloads
 - POST /run still returns test id; latest results/logs/metrics unchanged
 - Restart durability under postgres verified (history + latest views)
 - Final verification: 114 tests; PG + real runner 114/0/0/0 skipped
-- Deferred: Redis/distributed workers (Phase 10), Docker, React, AWS;
-  history pagination; GET /runs/{runId}
+- Deferred at Phase 9 close: Redis/distributed workers (now Phase 10),
+  Docker, React, AWS; history pagination; GET /runs/{runId}
+
+**Phase 10 — Queue and Distributed Workers**
+- COMPLETE (M1–M4)
+- M1: Redis Streams queue foundation (publish / consumer group /
+  XREADGROUP / XAUTOCLAIM / ACK); message contract = `runId` + `testId`
+- M2: PostgreSQL claim / renew / complete / reclaimExpiredRunning;
+  worker_id + lease fencing; renew/complete require owner + RUNNING +
+  unexpired lease; expired RUNNING → FAILED/TIMEOUT (no Python rerun)
+- M3: Same JAR as API (`role=api`, web on) or worker (`role=worker`,
+  web-application-type=none, nonblank NETVERIFY_WORKER_ID);
+  API writes PG + publishes Redis, never runs Python; worker consumes,
+  claims, executes Python/C; batch size 1
+- M4: Crash windows A/B/C (`WorkerCrashRecoveryIntegrationTest`);
+  multi-worker D + restart E (`WorkerMultiWorkerIntegrationTest`);
+  docs + Definition of Done
+- Semantics: Redis = at-least-once transport; PG = execution authority;
+  not generic exactly-once messaging
+- Lease defaults: PG 120s, heartbeat 30s, XAUTOCLAIM min-idle 150s
+- Accepted boundaries: dual-write DB→Redis (no outbox); orphan QUEUED
+  possible; no stale-QUEUED republisher; no DB-wide sweeper;
+  RUNNING_WITHOUT_LEASE not auto-repaired; lost Redis messages not
+  reconstructed; Docker/React/AWS remain later
+- Verified real M3 smoke: queue while worker offline; later consume;
+  terminal result; restart did not duplicate terminal run
 
 Next:
-- Begin Phase 10 — Queue and Workers
+- Begin Phase 11 — Docker
 
 Last updated:
-2026-10-05
+2026-10-11
 
 ---
 

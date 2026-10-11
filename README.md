@@ -14,13 +14,16 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 7** — Stress and Performance Testing: complete
 - **Phase 8** — Java Spring Boot Control Plane: complete
 - **Phase 9** — PostgreSQL Persistence: complete
+- **Phase 10** — Queue and Distributed Workers: complete
 
-**Current phase:** Phase 9 — PostgreSQL Persistence: complete
-**Next phase:** Phase 10 — Queue and Workers
+**Current phase:** Phase 10 — Queue and Distributed Workers: complete
+**Next phase:** Phase 11 — Docker
 
 Phase 8 adds a Java 21 / Maven / Spring Boot control plane under `control-plane/`. Tests are created and started over HTTP; a bounded Java executor launches `automation/runner.py --json` via `ProcessBuilder`, which drives the existing C `net_server` / `net_client`.
 
-Phase 9 adds optional PostgreSQL durability (`postgres` Spring profile): immutable definitions in `tests`, every execution in `test_runs`, and `GET /api/tests/{id}/runs` history. The default profile remains completely DB-free (`InMemoryTestRepository` + `InMemoryRunLifecycleStore`). Redis, Docker, React, AWS, and distributed workers are not part of Phase 9.
+Phase 9 adds optional PostgreSQL durability (`postgres` Spring profile): immutable definitions in `tests`, every execution in `test_runs`, and `GET /api/tests/{id}/runs` history. The default profile remains completely DB-free (`InMemoryTestRepository` + `InMemoryRunLifecycleStore`).
+
+Phase 10 adds optional distributed execution: the same Spring Boot JAR runs as either an HTTP **API** process or a headless **worker** process. PostgreSQL remains authoritative for run state and lease fencing; Redis Streams is transport only (at-least-once delivery). Docker, React, and AWS remain later phases.
 
 HTTP scenarios: `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, `concurrent_load`. `latency_injection` is intentionally not exposed (requires privileged `tc`/`netem`).
 
@@ -95,7 +98,7 @@ python3 automation/runner.py --all
 python3 automation/runner.py --test concurrent_load --clients 100 --count 1000
 ```
 
-## Control Plane (Phases 8–9)
+## Control Plane (Phases 8–10)
 
 Build the C binaries first, then point the control plane at the repo root and start Spring Boot:
 
@@ -110,10 +113,12 @@ Optional config (defaults shown): `netverify.runner-timeout-seconds=120`, `netve
 
 ### Profiles
 
-| Profile | Persistence |
-|---------|-------------|
-| default (DB-free) | `InMemoryTestRepository` + `InMemoryRunLifecycleStore` (process-local; restart loses state) |
-| `postgres` | `JdbcTestRepository` + `JdbcRunLifecycleStore` → `TestRunRepository` (Flyway V1 schema) |
+| Profile / role | Role |
+|----------------|------|
+| default (DB-free) | Local in-memory store; process-local; restart loses state |
+| `postgres` | JDBC + Flyway; local executor still runs Python in-process |
+| `postgres,redis` + `netverify.role=api` | Distributed API: HTTP + PG write + Redis publish; **no** Python |
+| `postgres,redis` + `netverify.role=worker` | Distributed worker: headless consumer; PG claim/fence + Python/C |
 
 PostgreSQL credentials (required for the `postgres` profile; never commit real values):
 
@@ -148,11 +153,11 @@ Each execution has its own internal run UUID. Transitions:
 QUEUED → RUNNING → PASSED | FAILED
 ```
 
-Also: executor rejection → `QUEUED → FAILED` (`LAUNCH`); startup recovery cancels orphan `QUEUED`/`RUNNING` rows as `CANCELLED` (single-instance assumption; no multi-instance coordination). PostgreSQL allows at most one active (`QUEUED`/`RUNNING`) run per test via a partial unique index; transitions use conditional SQL updates.
+Also: executor rejection → `QUEUED → FAILED` (`LAUNCH`); under **postgres-only** (no redis), startup recovery cancels orphan `QUEUED`/`RUNNING` rows as `CANCELLED` (single-instance assumption). That cancel-all path is **disabled** when the `redis` profile is active (distributed mode uses leases instead). PostgreSQL allows at most one active (`QUEUED`/`RUNNING`) run per test via a partial unique index; transitions use conditional SQL updates.
 
 Under `postgres`, definitions, full run history, and latest results/logs/metrics survive backend restart; a persisted test can be run again after restart.
 
-### Architecture
+### Architecture (local Phases 8–9)
 
 ```text
 TestService
@@ -162,14 +167,84 @@ TestService
 
 - Default: `InMemoryTestRepository` + `InMemoryRunLifecycleStore`
 - Postgres: `JdbcTestRepository` + `JdbcRunLifecycleStore` → `TestRunRepository`
-- Stack: Spring JDBC / `JdbcTemplate`, Flyway (V1), PostgreSQL JSONB for `runner_result`, relational `failure_category`. No JPA. The old `InMemoryTestStore` lifecycle was retired in Phase 9.
+- Stack: Spring JDBC / `JdbcTemplate`, Flyway (V1+V2 lease columns), PostgreSQL JSONB for `runner_result`, relational `failure_category`. No JPA.
+
+### Distributed architecture (Phase 10)
+
+```text
+HTTP client
+    → Spring API process (role=api)
+    → PostgreSQL (authoritative state)
+    → Redis Stream (transport)
+    → Spring worker process (role=worker, web=none)
+    → Python runner
+    → C net_server / net_client
+```
+
+API and worker are **separate OS/JVM processes** using the **same** Spring Boot JAR.
+
+| Concern | Redis | PostgreSQL |
+|---------|-------|------------|
+| Role | At-least-once transport (consumer group, PEL, XAUTOCLAIM) | Authoritative run state, ownership, results |
+| Message | Exactly `runId` + `testId` | Full definition, lifecycle, logs, metrics |
+| Execution authority | **No** — Redis ownership alone never authorizes Python | **Yes** — successful PG claim + valid lease |
+
+Duplicate Redis delivery is possible; PG fencing prevents a second effective execution of the same active run in the verified scenarios. This is **not** generic exactly-once messaging.
+
+**Lease defaults:** PG claim/renew horizon **120s**; heartbeat every **30s**; Redis XAUTOCLAIM min-idle **150s** (intentionally greater than 120s). Expired `RUNNING` is reclaimed to `FAILED` / `TIMEOUT` (no automatic Python retry). `RUNNING_WITHOUT_LEASE` is never stolen automatically (no ACK; not auto-repaired).
+
+**Crash / recovery matrix:**
+
+| | Failure window | Outcome |
+|---|----------------|---------|
+| **A** | Redis delivered, die before PG claim | Later XAUTOCLAIM → new worker PG-claims and executes once |
+| **B** | Die after PG claim / during execution | Peers blocked while lease valid; after expiry → reclaim `FAILED`/`TIMEOUT` (no automatic rerun) |
+| **C** | PG terminal committed, die before Redis ACK | Redelivery → `ALREADY_TERMINAL` → ACK only |
+| **D** | Multiple healthy workers | Shared consumer group; distinct worker IDs; PG fencing blocks duplicate execution of the same run |
+| **E** | Worker restart | Restart does not bypass a still-valid PG lease; terminal/redelivery follow PG state |
+
+**Accepted Phase 10 boundaries** (deliberate scope, not hidden bugs): DB→Redis is a dual write (no transactional outbox); crash after PG `QUEUED` before Redis publish can leave an orphan `QUEUED` row; no stale-QUEUED republisher; no DB-wide lease sweeper; `RUNNING_WITHOUT_LEASE` not auto-repaired; externally lost Redis messages not reconstructed; expired `RUNNING` is terminal `TIMEOUT` not retry; batch size remains 1; postgres-only cancel-all recovery stays single-instance; Docker/React/AWS are later phases. Full detail in [PROJECT_SPEC.md](PROJECT_SPEC.md) Phase 10.
+
+### Distributed launch
+
+Worker only: `NETVERIFY_REPO_ROOT` must point to the NetVerify repository root containing `automation/runner.py`, `net_server`, and `net_client`. Never commit real DB passwords.
+
+**API process:**
+
+```bash
+export NETVERIFY_DB_URL='jdbc:postgresql://HOST:5432/DBNAME'
+export NETVERIFY_DB_USER='...'
+export NETVERIFY_DB_PASSWORD='...'
+export NETVERIFY_REDIS_HOST=localhost
+export NETVERIFY_REDIS_PORT=6379
+cd control-plane
+mvn spring-boot:run \
+  -Dspring-boot.run.profiles=postgres,redis \
+  -Dspring-boot.run.arguments="--netverify.role=api"
+```
+
+**Worker process** (separate terminal; distinct `NETVERIFY_WORKER_ID` per worker):
+
+```bash
+export NETVERIFY_DB_URL='jdbc:postgresql://HOST:5432/DBNAME'
+export NETVERIFY_DB_USER='...'
+export NETVERIFY_DB_PASSWORD='...'
+export NETVERIFY_REDIS_HOST=localhost
+export NETVERIFY_REDIS_PORT=6379
+export NETVERIFY_WORKER_ID=worker-1
+export NETVERIFY_REPO_ROOT=/path/to/netverify
+cd control-plane
+mvn spring-boot:run \
+  -Dspring-boot.run.profiles=postgres,redis \
+  -Dspring-boot.run.arguments="--netverify.role=worker --spring.main.web-application-type=none --netverify.worker-id=${NETVERIFY_WORKER_ID}"
+```
 
 ### Testing
 
 ```bash
 cd control-plane
 
-# DB-free unit/API suite (default profile; PG ITs skip without DB env)
+# DB-free unit/API suite (default; PG/Redis ITs skip without env)
 mvn test
 
 # Opt-in PostgreSQL integration tests
@@ -178,12 +253,22 @@ export NETVERIFY_DB_USER='...'
 export NETVERIFY_DB_PASSWORD='...'
 mvn test
 
+# Opt-in Redis Streams IT
+export NETVERIFY_REDIS_HOST=localhost
+export NETVERIFY_REDIS_PORT=6379
+mvn -Dtest=RedisRunQueueIntegrationTest test
+
+# Opt-in Phase 10 crash / multi-worker ITs (need both DB + Redis env)
+mvn -Dtest=WorkerCrashRecoveryIntegrationTest,WorkerMultiWorkerIntegrationTest test
+
 # Opt-in real Python runner IT (needs built C binaries + repo root)
 export NETVERIFY_REPO_ROOT=/path/to/netverify
 mvn test
 ```
 
-Phase 9 final verification: **114** tests. DB-free run skips PostgreSQL ITs as expected. With `NETVERIFY_DB_*` + `NETVERIFY_REPO_ROOT`: **114** tests, **0** failures / errors / skipped. Real HTTP restart check confirmed two distinct persisted run IDs, history ordering, and identical history/results/logs/metrics after JVM restart.
+Default `mvn test` stays DB/Redis-free; opt-in ITs skip cleanly without env. Notable Phase 10 tests: `WorkerCrashRecoveryIntegrationTest` (crash windows A/B/C), `WorkerMultiWorkerIntegrationTest` (multi-worker D + restart E), `WorkerRunLifecycleIntegrationTest` (PG claim/lease/fencing), `RedisRunQueueIntegrationTest` (stream/group/XAUTOCLAIM).
+
+Verified real distributed smoke (M3): API queued a run while the worker was offline; a later worker consumed the Redis message; Python/C ran only in the worker; PostgreSQL reached a terminal result; worker restart did not duplicate an already-terminal run.
 
 Minimal curl flow (server on port 8080):
 
