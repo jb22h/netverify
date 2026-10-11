@@ -5,3 +5,6 @@ net_client
 # Python
 __pycache__/
 *.py[cod]
+
+# Local Compose secrets (keep .env.example tracked)
+.env

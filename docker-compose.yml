@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - netverify-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: netverify-app:local
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres,redis
+      NETVERIFY_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      NETVERIFY_DB_USER: ${POSTGRES_USER}
+      NETVERIFY_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      NETVERIFY_REDIS_HOST: redis
+      NETVERIFY_REDIS_PORT: "6379"
+    command: ["--netverify.role=api"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: netverify-app:local
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres,redis
+      NETVERIFY_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      NETVERIFY_DB_USER: ${POSTGRES_USER}
+      NETVERIFY_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      NETVERIFY_REDIS_HOST: redis
+      NETVERIFY_REDIS_PORT: "6379"
+      NETVERIFY_WORKER_ID: worker-1
+      NETVERIFY_REPO_ROOT: /opt/netverify
+    command:
+      - "--netverify.role=worker"
+      - "--spring.main.web-application-type=none"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  netverify-postgres-data:
