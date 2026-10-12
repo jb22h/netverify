@@ -2,7 +2,11 @@ import { apiRequest } from './client'
 import type {
   CreateTestRequest,
   RunAcceptedResponse,
+  RunSummaryDto,
+  TestLogsResponse,
+  TestMetricsResponse,
   TestResponse,
+  TestResultResponse,
 } from './types'
 
 export function listTests(signal?: AbortSignal): Promise<TestResponse[]> {
@@ -40,5 +44,45 @@ export function runTest(
       method: 'POST',
       signal,
     },
+  )
+}
+
+export function listRuns(
+  testId: string,
+  signal?: AbortSignal,
+): Promise<RunSummaryDto[]> {
+  return apiRequest<RunSummaryDto[]>(
+    `/api/tests/${encodeURIComponent(testId)}/runs`,
+    { signal },
+  )
+}
+
+export function getResult(
+  testId: string,
+  signal?: AbortSignal,
+): Promise<TestResultResponse> {
+  return apiRequest<TestResultResponse>(
+    `/api/tests/${encodeURIComponent(testId)}/results`,
+    { signal },
+  )
+}
+
+export function getMetrics(
+  testId: string,
+  signal?: AbortSignal,
+): Promise<TestMetricsResponse> {
+  return apiRequest<TestMetricsResponse>(
+    `/api/tests/${encodeURIComponent(testId)}/metrics`,
+    { signal },
+  )
+}
+
+export function getLogs(
+  testId: string,
+  signal?: AbortSignal,
+): Promise<TestLogsResponse> {
+  return apiRequest<TestLogsResponse>(
+    `/api/tests/${encodeURIComponent(testId)}/logs`,
+    { signal },
   )
 }

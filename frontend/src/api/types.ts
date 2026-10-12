@@ -45,6 +45,67 @@ export interface RunAcceptedResponse {
   queuedAt: string
 }
 
+/** Mirrors domain FailureCategory. */
+export type FailureCategory =
+  | 'VERIFICATION'
+  | 'SETUP'
+  | 'LAUNCH'
+  | 'TIMEOUT'
+  | 'PARSE'
+
+/** Mirrors RunSummaryDto JSON (GET .../runs). */
+export interface RunSummaryDto {
+  id: string
+  testId: string
+  status: TestStatus
+  queuedAt: string
+  startedAt: string | null
+  finishedAt: string | null
+  exitCode: number | null
+  failureCategory: FailureCategory | null
+}
+
+/**
+ * Mirrors RunnerResultDto JSON — snake_case fields match automation/runner.py.
+ */
+export interface RunnerResultDto {
+  name: string
+  passed: boolean
+  failures: string[]
+  client_exit_code: number | null
+  duration_s: number
+  metrics: Record<string, unknown>
+}
+
+/** Mirrors TestResultResponse JSON (GET .../results). */
+export interface TestResultResponse {
+  id: string
+  name: string
+  scenario: string
+  status: TestStatus
+  exitCode: number | null
+  failureCategory: FailureCategory | null
+  startedAt: string | null
+  finishedAt: string | null
+  result: RunnerResultDto | null
+}
+
+/** Mirrors TestMetricsResponse JSON (GET .../metrics). */
+export interface TestMetricsResponse {
+  id: string
+  status: TestStatus
+  failureCategory: FailureCategory | null
+  metrics: Record<string, unknown>
+}
+
+/** Mirrors TestLogsResponse JSON (GET .../logs). */
+export interface TestLogsResponse {
+  id: string
+  status: TestStatus
+  stdout: string
+  stderr: string
+}
+
 /** Mirrors control-plane ErrorResponse JSON. */
 export interface ErrorResponseBody {
   timestamp?: string

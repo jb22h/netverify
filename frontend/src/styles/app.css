@@ -306,6 +306,165 @@ code {
   margin-top: 0.75rem;
 }
 
+.panel {
+  margin: 1.5rem 0 0;
+  padding: 1.1rem 1.2rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.panel h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.15rem;
+}
+
+.panel h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+.panel-subtitle {
+  margin: 0 0 0.9rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.panel-note {
+  margin: 0;
+  padding: 0.75rem 0.85rem;
+  background: #f7f8f6;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.panel-meta {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.detail-grid.compact {
+  margin-bottom: 0.75rem;
+}
+
+.wrap-code {
+  word-break: break-all;
+}
+
+.result-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.pass-label,
+.fail-label,
+.muted-label {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 0.9rem;
+  letter-spacing: 0.03em;
+}
+
+.pass-label {
+  color: #14523a;
+}
+
+.fail-label {
+  color: #7a2e24;
+}
+
+.muted-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.failures-block {
+  margin-top: 0.75rem;
+}
+
+.failures-block ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.metric-root,
+.metric-nested {
+  margin: 0;
+}
+
+.metric-entry {
+  display: grid;
+  grid-template-columns: minmax(8rem, 14rem) 1fr;
+  gap: 0.35rem 1rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.metric-entry:last-child {
+  border-bottom: none;
+}
+
+.metric-entry dt {
+  margin: 0;
+  font-weight: 600;
+}
+
+.metric-entry dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.metric-list {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.metric-null {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.9rem;
+}
+
+.log-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.log-stream h3 {
+  margin: 0 0 0.35rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  text-transform: lowercase;
+}
+
+.log-pre {
+  margin: 0;
+  max-height: 22rem;
+  overflow: auto;
+  padding: 0.75rem 0.85rem;
+  background: #1a1f1c;
+  color: #e8ede9;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-pre:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .metric-entry {
+    grid-template-columns: 1fr;
+  }
+}
+
 .table-wrap {
   overflow-x: auto;
   background: var(--surface);

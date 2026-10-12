@@ -2,8 +2,13 @@ import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ErrorBanner } from '../components/ErrorBanner'
 import { LoadingBlock } from '../components/LoadingBlock'
+import { LogsPanel } from '../components/LogsPanel'
+import { MetricsPanel } from '../components/MetricsPanel'
+import { ResultPanel } from '../components/ResultPanel'
 import { RunButton } from '../components/RunButton'
+import { RunHistoryTable } from '../components/RunHistoryTable'
 import { StatusBadge } from '../components/StatusBadge'
+import { useTestArtifacts } from '../hooks/useTestArtifacts'
 import { useTestDetail } from '../hooks/useTestDetail'
 import { isActiveRunStatus } from '../api/types'
 
@@ -12,6 +17,18 @@ function formatInstant(value: string | null): string {
     return '—'
   }
   return value
+}
+
+function artifactGateMessage(
+  gate: ReturnType<typeof useTestArtifacts>['gate'],
+): string | undefined {
+  if (gate === 'created') {
+    return 'No terminal artifacts yet. Trigger a run to produce result, metrics, and logs.'
+  }
+  if (gate === 'active-run') {
+    return 'A run is in progress. Latest result, metrics, and logs will load when the run reaches a terminal status.'
+  }
+  return undefined
 }
 
 function TestDetailBody({
@@ -30,6 +47,9 @@ function TestDetailBody({
     runSubmitting,
     triggerRun,
   } = useTestDetail(testId)
+
+  const artifacts = useTestArtifacts(testId, test?.status)
+  const gatedMessage = artifactGateMessage(artifacts.gate)
 
   if (loading) {
     return <LoadingBlock label="Loading test…" />
@@ -170,6 +190,40 @@ function TestDetailBody({
           onRetry={onReload}
         />
       ) : null}
+
+      <RunHistoryTable
+        runs={artifacts.runs}
+        loading={artifacts.historyLoading}
+        error={artifacts.historyError}
+        onRetry={artifacts.retryHistory}
+      />
+
+      <ResultPanel
+        result={artifacts.result}
+        loading={artifacts.artifactsLoading}
+        error={artifacts.resultError}
+        pending409={artifacts.resultPending}
+        gatedMessage={gatedMessage}
+        onRetry={artifacts.retryArtifacts}
+      />
+
+      <MetricsPanel
+        metrics={artifacts.metrics}
+        loading={artifacts.artifactsLoading}
+        error={artifacts.metricsError}
+        pending409={artifacts.metricsPending}
+        gatedMessage={gatedMessage}
+        onRetry={artifacts.retryArtifacts}
+      />
+
+      <LogsPanel
+        logs={artifacts.logs}
+        loading={artifacts.artifactsLoading}
+        error={artifacts.logsError}
+        pending409={artifacts.logsPending}
+        gatedMessage={gatedMessage}
+        onRetry={artifacts.retryArtifacts}
+      />
     </>
   )
 }
