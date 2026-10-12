@@ -65,6 +65,17 @@ services:
       redis:
         condition: service_healthy
 
+  dashboard:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: netverify-dashboard:local
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_started
+
   # Optional second worker (distinct ID). Not started by default:
   #   docker compose --profile multiworker up -d worker-2
   worker-2:
