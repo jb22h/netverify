@@ -16,19 +16,64 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 9** — PostgreSQL Persistence: complete
 - **Phase 10** — Queue and Distributed Workers: complete
 - **Phase 11** — Docker: complete
+- **Phase 12** — React + TypeScript Dashboard: complete
 
-**Current phase:** Phase 11 — Docker: complete
-**Next phase:** Phase 12 — React / TypeScript Dashboard
+**Current phase:** Phase 12 — React + TypeScript Dashboard: complete
+**Next phase:** Phase 13 — CI/CD
 
-Phase 8 adds a Java 21 / Maven / Spring Boot control plane under `control-plane/`. Tests are created and started over HTTP; a bounded Java executor launches `automation/runner.py --json` via `ProcessBuilder`, which drives the existing C `net_server` / `net_client`.
+Phase 8–11 provide the Spring Boot control plane, PostgreSQL persistence, Redis Streams workers, and the Docker Compose stack. Phase 12 adds a React + TypeScript dashboard (Vite, native `fetch`, React Router) and an nginx container that serves the UI and proxies same-origin `/api` to the API.
 
-Phase 9 adds optional PostgreSQL durability (`postgres` Spring profile): immutable definitions in `tests`, every execution in `test_runs`, and `GET /api/tests/{id}/runs` history. The default profile remains completely DB-free (`InMemoryTestRepository` + `InMemoryRunLifecycleStore`).
+HTTP scenarios (dashboard + API): `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, `concurrent_load`. `latency_injection` is intentionally not exposed (requires privileged `tc`/`netem`). CI/CD and AWS are not part of Phase 12.
 
-Phase 10 adds optional distributed execution: the same Spring Boot JAR runs as either an HTTP **API** process or a headless **worker** process. PostgreSQL remains authoritative for run state and lease fencing; Redis Streams is transport only (at-least-once delivery).
+## Quick start (Docker Compose)
 
-Phase 11 packages that distributed stack in Docker: one application image for API and worker roles, plus official PostgreSQL and Redis Compose services. React and AWS remain later phases.
+Copy `.env.example` to a local `.env` (gitignored). Never commit a real `.env` or DB password.
 
-HTTP scenarios: `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, `concurrent_load`. `latency_injection` is intentionally not exposed (requires privileged `tc`/`netem`).
+```bash
+cp .env.example .env
+docker compose up --build -d
+```
+
+Then open:
+
+- **Dashboard:** http://localhost:3000
+- **API (debug):** http://localhost:8080
+
+Optional second worker (distinct `NETVERIFY_WORKER_ID`; not blind `scale`):
+
+```bash
+docker compose --profile multiworker up --build -d
+```
+
+Useful commands:
+
+```bash
+docker compose ps
+docker compose logs -f api worker dashboard
+docker compose down          # keeps PostgreSQL named volume
+# docker compose down -v     # intentionally deletes the volume
+```
+
+On a cold start the dashboard may briefly return **502** for `/api` while Spring Boot is still starting (`dashboard` depends on `api` with `service_started`; the API has no healthcheck). Retry after a few seconds.
+
+## Architecture
+
+```text
+Browser
+    → nginx React dashboard (:3000)
+         → static UI
+         → /api/*  →  Spring Boot API (:8080, role=api)
+                        → Redis Streams
+                             → Java worker (role=worker)
+                                  → Python runner
+                                       → C net_server / net_client
+                        → PostgreSQL
+```
+
+- Dashboard and API are separate containers. The browser calls **same-origin** `/api/...` on `:3000`; nginx proxies to Compose DNS `api:8080`. No Spring CORS config is required for this path.
+- API remains published on host `:8080` for curl/debugging.
+- PostgreSQL and Redis use service names `postgres` / `redis` inside Compose — never `localhost` for cross-container traffic.
+- Phase 10 semantics unchanged: Redis is at-least-once transport; PostgreSQL is authoritative state / execution ownership.
 
 ## Directory Layout
 
@@ -41,6 +86,11 @@ netverify/
 │   └── netem.py
 ├── control-plane/
 │   ├── pom.xml
+│   └── src/
+├── frontend/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── package.json
 │   └── src/
 ├── networking/
 │   ├── client/
@@ -60,11 +110,10 @@ See [PROJECT_SPEC.md](PROJECT_SPEC.md) for the full roadmap.
 ## Prerequisites
 
 - Linux (WSL2 / Ubuntu)
-- GCC
-- GNU Make
-- Python 3
-- Java 21
-- Maven
+- Docker + Docker Compose (for the full stack)
+- GCC, GNU Make, Python 3 (local C/automation)
+- Java 21, Maven (local control plane)
+- Node.js 24+ / npm (local dashboard dev)
 
 ## Build
 
@@ -72,7 +121,7 @@ See [PROJECT_SPEC.md](PROJECT_SPEC.md) for the full roadmap.
 make
 ```
 
-This produces `net_server` and `net_client`.
+This produces `net_server` and `net_client` (also built inside the worker image).
 
 ## Run (C client/server)
 
@@ -296,61 +345,64 @@ curl -s http://localhost:8080/api/tests/<id>/metrics
 curl -s http://localhost:8080/api/tests/<id>/logs
 ```
 
-## Docker (Phase 11)
+## Dashboard (Phase 12)
 
-Phase 11 makes the Phase 10 distributed stack reproducible with Docker Compose. Phase 10 semantics are unchanged: Redis is at-least-once transport; PostgreSQL is authoritative state and execution ownership; there is no generic exactly-once guarantee, no transactional outbox, and no stale-`QUEUED` republisher. Expired `RUNNING` still becomes `FAILED` / `TIMEOUT`.
+React + TypeScript UI under `frontend/` (Vite, React Router, native `fetch`). No Redux, no React Query, no chart library.
 
-### Architecture
+### Capabilities
 
-```text
-HTTP client
-    → api container          (same app image, role=api)
-    → PostgreSQL + Redis     (official images: postgres:18, redis:8)
-    → worker container       (same app image, role=worker)
-    → Python runner
-    → C net_server / net_client
-```
+- List and create tests (HTTP scenarios above; `clients` only for `concurrent_load`)
+- Test detail with Run action
+- Poll status while `QUEUED` / `RUNNING`
+- Terminal PASS/FAIL presentation
+- Run history (`GET .../runs`)
+- Latest result, generic heterogeneous metrics renderer, stdout/stderr logs
+- Section-specific errors; **409** treated as “artifact not ready yet”
+- Stale result/metrics/logs hidden while a new run is active
 
-- **API** and **worker** are separate containers/processes using the **same** NetVerify application image (`Dockerfile` → `netverify-app:local`) with different runtime roles/config.
-- PostgreSQL and Redis are separate official containers. Cross-container deps use Compose DNS names `postgres` / `redis` — **never** `localhost`.
-- The worker image layout includes `automation/runner.py`, `net_server`, and `net_client` at `NETVERIFY_REPO_ROOT=/opt/netverify` (worker only; API does not execute Python).
+### Local frontend development
 
-Milestones: **M1** application image; **M2** Compose stack (`postgres`, `redis`, `api`, `worker`); **M3** optional `worker-2` + real Docker verification.
-
-### Developer workflow
-
-Copy `.env.example` to a local `.env` (gitignored). Never commit a real `.env` or DB password.
+API must listen on `:8080` (Compose `api` or local Spring Boot). Vite proxies `/api` → `http://localhost:8080`.
 
 ```bash
-cp .env.example .env
-docker compose up --build -d
-docker compose ps
-docker compose logs -f api worker
-docker compose down
+cd frontend
+npm ci          # or: npm install
+npm run dev     # http://127.0.0.1:5173
 ```
 
-- `docker compose down` removes containers and the Compose network but **preserves** the named PostgreSQL volume (`netverify-postgres-data`).
-- `docker compose down -v` intentionally deletes that volume (destructive).
+### Containerized dashboard
 
-Default stack: `postgres` + `redis` + `api` (`:8080`) + one worker (`NETVERIFY_WORKER_ID=worker-1`).
+- Multi-stage `frontend/Dockerfile`: `node:24-alpine` build → `nginx:1.28-alpine` runtime (no Node in the final image)
+- Compose service `dashboard` publishes **http://localhost:3000**
+- nginx serves the static build and proxies `/api/` → `http://api:8080` (Compose DNS; path preserved)
+- SPA deep links use `try_files … /index.html`
+- Same-origin browser calls → **no Spring CORS** configuration required
 
-### Optional second worker
+### Current limitations
 
-Worker IDs are part of PostgreSQL lease ownership and Redis consumer identity, so blind `compose scale` with one shared fixed worker ID is unsafe. Use the explicit `worker-2` service behind the Compose profile `multiworker`:
+- Metrics are generic key/value (and nested) rendering — **no charts / time-series UI**
+- Result, metrics, and logs endpoints expose **latest-run** artifacts only (no `GET /runs/{runId}` detail)
+- No authentication
+- No WebSocket / live log streaming
+- CI/CD and AWS are **not** implemented
 
-```bash
-docker compose --profile multiworker up -d worker-2
-```
+### Verified Compose + dashboard smoke
 
-### Verified Docker smoke
-
-Real verification completed on this stack:
-
-1. Default stack healthy: postgres, redis, api on `:8080`, headless `worker-1`.
-2. HTTP `basic_ping_pong`: create → `QUEUED` → `PASSED`, `exitCode=0`, runner metrics present; PostgreSQL `worker_id=worker-1`, `lease_expires_at` cleared.
-3. Restart `worker-1`: still exactly one `test_run` (same run UUID), still `PASSED` — no duplicate execution.
-4. Multi-worker: stop `worker-1`, start `worker-2` via `--profile multiworker`; new `basic_ping_pong` → `PASSED` with PostgreSQL `worker_id=worker-2`, lease cleared.
+1. `docker compose up --build -d` — stack includes postgres, redis, api, worker, dashboard.
+2. After API readiness: `http://localhost:3000/api/tests` and `http://localhost:8080/api/tests` both succeed.
+3. Created test via dashboard (`basic_ping_pong`, count 5) → **PASSED**, `exitCode=0`, `passed=true`, real metrics, stdout present, stderr empty.
+4. Direct deep link `/tests/<uuid>` → nginx **200** + `index.html`.
 5. `docker compose down` preserves `netverify_netverify-postgres-data`.
+
+Earlier Phase 11 verification (API/worker without dashboard) still stands: worker-1/worker-2 ownership, restart without duplicate terminal runs, PG volume retention.
+
+## Docker notes (Phases 11–12)
+
+Phase 11 introduced the app image (`netverify-app:local`) and Compose `postgres` / `redis` / `api` / `worker` (+ optional `worker-2`). Phase 12 adds `dashboard` (`netverify-dashboard:local` on `:3000`).
+
+Worker-only: `NETVERIFY_REPO_ROOT=/opt/netverify` inside the worker container. Worker IDs are PG lease owners and Redis consumer names — use the `multiworker` profile for a second worker, not blind `compose scale`.
+
+Phase 10 semantics inside containers are unchanged (Redis transport, PostgreSQL ownership, no transactional outbox, expired `RUNNING` → `FAILED`/`TIMEOUT`).
 
 ## Clean
 

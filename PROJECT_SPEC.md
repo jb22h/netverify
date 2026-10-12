@@ -943,51 +943,65 @@ Definition of Done:
 ---
 
 ## Phase 12 — React + TypeScript Dashboard
-Goal: Visualize the system.
+Goal: Visualize the system through a lightweight dashboard over the existing REST API.
 
-**Status: NOT STARTED**
+**Status: COMPLETE**
 
+### What shipped (aligned with the real API)
 
-Pages:
+Stack: React + TypeScript + Vite under `frontend/`; React Router; native `fetch`; no Redux / React Query / chart library.
 
-### Test Runs
-- ID
-- name
-- state
-- start time
-- duration
-- pass/fail
+Dashboard capabilities:
+- List tests; create tests (`name`, `scenario`, `count`, optional `clients` for `concurrent_load`)
+- HTTP scenarios only: `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, `concurrent_load` (not `latency_injection`)
+- Test detail; trigger run; poll `QUEUED` / `RUNNING` until terminal
+- Run history from `GET /api/tests/{id}/runs`
+- Latest result / metrics / logs; generic heterogeneous metrics renderer
+- Section-specific errors; **409** as artifact-not-ready; stale artifacts hidden during a new active run
 
-### Create Test
-Inputs:
-- protocol
-- number of clients
-- duration
-- packet loss
-- latency
+### Milestone summary (M1–M4)
 
-### Test Details
-Show:
-- configuration
-- logs
-- metrics
-- result
-- failure timeline
+- **M1** — Vite foundation, API client, test list, Vite `/api` → `:8080` proxy
+- **M2** — Create form, detail page, Run, ~2s status polling with AbortController cleanup
+- **M3** — History + result + metrics + logs panels
+- **M4** — `frontend/Dockerfile` (`node:24-alpine` → `nginx:1.28-alpine`), Compose `dashboard` on `:3000`, nginx `/api/` → `http://api:8080`, docs + smoke
 
-### Metrics
-Charts:
-- latency over time
-- throughput
-- errors
-- active connections
+### Docker dashboard architecture
+
+```text
+Browser (:3000)
+    → nginx (static React + SPA try_files)
+         → /api/* → api:8080 (Compose DNS)
+              → Redis → worker → Python → C
+              → PostgreSQL
+```
+
+Same-origin `/api` via nginx → **no Spring CORS** change. API still on host `:8080` for debugging. Brief **502** possible until API is up (`depends_on: service_started`).
+
+### Verified smoke
+
+Containerized dashboard create/run `basic_ping_pong` → PASSED; metrics/logs present; deep link `/tests/<uuid>` returns `index.html`; `compose down` keeps PG volume; direct API `:8080` still works.
+
+### Deferred (explicit non-goals of Phase 12)
+
+- Charts / time-series visualization
+- Authentication
+- WebSocket / live log streaming
+- Run-specific artifact APIs (`GET /runs/{runId}`)
+- AWS / CI/CD (later phases)
 
 Definition of Done:
-- A user can create a test and understand its result without using the terminal.
+- ✅ A user can create a test and understand its result without using the terminal.
+- ✅ Dashboard runs locally (Vite) and in Compose (nginx `:3000`).
+- ✅ Backend semantics unchanged; no CORS required for Compose dashboard.
 
 ---
 
 ## Phase 13 — CI/CD
 Goal: Treat the project like production software.
+
+**Status: NOT STARTED**
+
 
 GitHub Actions pipeline:
 1. Compile C code.
@@ -1207,7 +1221,7 @@ Short version:
 
 Longer version:
 
-> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs with optional PostgreSQL durability for definitions, run history, and results. Optional Redis Streams deliver work to separate worker processes; PostgreSQL remains authoritative for execution ownership and lease fencing. Docker Compose reproduces the distributed API/worker stack with official PostgreSQL and Redis. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
+> NetVerify is a network verification platform I built to automate testing of connection-oriented network behavior. The low-level client/server components are written in C using Linux sockets. Python orchestrates test scenarios, launches processes, injects failures such as packet loss and latency, parses logs, and produces PASS/FAIL results. A Java Spring Boot control plane manages test jobs with optional PostgreSQL durability for definitions, run history, and results. Optional Redis Streams deliver work to separate worker processes; PostgreSQL remains authoritative for execution ownership and lease fencing. Docker Compose reproduces the API/worker stack with official PostgreSQL and Redis, plus an nginx-served React dashboard that proxies same-origin `/api` to the API. The project is designed to explore networking, Linux, concurrency, debugging, automation, distributed systems, and operational reliability.
 
 ---
 
@@ -1256,7 +1270,7 @@ I am building a portfolio project called NetVerify.
 
 Read PROJECT_SPEC.md before doing anything.
 
-NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (optional PostgreSQL persistence for definitions and run history; optional Redis Streams + distributed API/worker roles; Docker Compose for the reproducible stack). React/TypeScript dashboard and AWS come later.
+NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (optional PostgreSQL persistence for definitions and run history; optional Redis Streams + distributed API/worker roles; Docker Compose for the reproducible stack including an nginx React dashboard). CI/CD and AWS come later.
 
 This is an educational Software Engineering project. Do not build the whole project for me. Work one milestone at a time, explain architectural decisions, and make sure I can understand and explain the code in an interview.
 
@@ -1278,10 +1292,10 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 11 — Docker (COMPLETE)`
+`Phase 12 — React + TypeScript Dashboard (COMPLETE)`
 
 Next phase:
-`Phase 12 — React + TypeScript Dashboard (NOT STARTED)`
+`Phase 13 — CI/CD (NOT STARTED)`
 
 Completed:
 
@@ -1567,11 +1581,25 @@ Completed:
   ownership worker-2; `compose down` keeps PG volume
 - Phase 10 lease/queue semantics preserved inside containers
 
+**Phase 12 — React + TypeScript Dashboard**
+- COMPLETE (M1–M4)
+- M1: Vite React-TS foundation, API client, test list, Vite `/api` proxy
+- M2: create/detail/run + QUEUED/RUNNING polling (AbortController)
+- M3: run history + latest result/metrics/logs; generic metrics renderer;
+  409 soft-pending; stale artifacts gated during active run
+- M4: `frontend/Dockerfile` (node:24-alpine → nginx:1.28-alpine);
+  Compose `dashboard` on `:3000`; nginx `/api/` → `api:8080`; same-origin
+  (no Spring CORS); SPA `try_files`
+- Verified: compose up; dashboard create/run basic_ping_pong → PASSED;
+  metrics/logs; deep link `/tests/<uuid>`; PG volume survives `compose down`
+- Deferred: charts, auth, WebSocket logs, run-specific artifact APIs,
+  CI/CD (Phase 13), AWS
+
 Next:
-- Begin Phase 12 — React + TypeScript Dashboard
+- Begin Phase 13 — CI/CD
 
 Last updated:
-2026-10-11
+2026-10-13
 
 ---
 
