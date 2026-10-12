@@ -74,3 +74,62 @@ jobs:
           npm ci
           npm run lint
           npm run build
+
+  java-integration:
+    name: java-integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      NETVERIFY_DB_URL: jdbc:postgresql://localhost:5432/netverify
+      NETVERIFY_DB_USER: netverify
+      NETVERIFY_DB_PASSWORD: ci-only-not-a-secret
+      NETVERIFY_REDIS_HOST: localhost
+      NETVERIFY_REDIS_PORT: "6379"
+      NETVERIFY_REPO_ROOT: ${{ github.workspace }}
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: netverify
+          POSTGRES_USER: netverify
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U netverify -d netverify"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Tool versions
+        run: |
+          java -version
+          mvn --version
+          gcc --version
+          make --version
+
+      - name: Build C binaries
+        run: make
+
+      - name: Maven test with PostgreSQL and Redis
+        working-directory: control-plane
+        run: mvn -B test
