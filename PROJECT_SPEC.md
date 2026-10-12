@@ -988,7 +988,7 @@ Containerized dashboard create/run `basic_ping_pong` → PASSED; metrics/logs pr
 - Authentication
 - WebSocket / live log streaming
 - Run-specific artifact APIs (`GET /runs/{runId}`)
-- AWS / CI/CD (later phases)
+- AWS / deployment CD (Phase 14); charts/auth/live logs remain deferred
 
 Definition of Done:
 - ✅ A user can create a test and understand its result without using the terminal.
@@ -1000,27 +1000,63 @@ Definition of Done:
 ## Phase 13 — CI/CD
 Goal: Treat the project like production software.
 
-**Status: NOT STARTED**
+**Status: COMPLETE (CI portion)**
 
+Deployment / CD is **intentionally deferred**. Cloud deployment belongs to **Phase 14 — Cloud / AWS**.
 
-GitHub Actions pipeline:
-1. Compile C code.
-2. Run C tests.
-3. Run Python tests.
-4. Build Java backend.
-5. Run Java unit/integration tests.
-6. Build frontend.
-7. Optional Docker image build.
+### What shipped
 
-Rules:
-- Broken build fails CI.
-- Warnings stay visible.
-- Tests remain repeatable.
+Workflow: `.github/workflows/ci.yml`
+
+Triggers: push to `main`, pull requests
+
+Runner: `ubuntu-24.04`
+
+Actions: `actions/checkout@v7`, `actions/setup-java@v6` (Temurin 21 + Maven cache), `actions/setup-node@v7` (Node 24 + npm cache)
+
+| Job | Purpose |
+|-----|---------|
+| `c-python` | `make` + `python3 automation/runner.py --all` |
+| `java` | DB/Redis-free `mvn -B test` (gated ITs skip) |
+| `frontend` | `npm ci` / lint / build |
+| `java-integration` | Postgres 18 + Redis 8 service containers; `make` + env-gated `mvn -B test` |
+| `docker` | Build `netverify-app:ci` + `netverify-dashboard:ci`; `compose config` with ephemeral `.env` from `.env.example` |
+
+### Milestone summary (M1–M4)
+
+- **M1** — Baseline CI (`c-python`, `java`, `frontend`)
+- **M2** — `java-integration` with Postgres/Redis services + `NETVERIFY_*` / `NETVERIFY_REPO_ROOT`
+- **M3** — Docker image builds + Compose config validation (no `compose up`)
+- **M4** — Documentation / Phase 13 closure
+
+### Verified results
+
+- Full five-job GitHub Actions run green
+- `java-integration`: **248** tests, **0** failures, **0** errors, **0** skipped (includes real Python runner, PG persistence, Redis queue, multi-worker, crash-recovery)
+
+### Explicit exclusions
+
+- `latency_injection` / sudo `tc`/`netem`
+- Full Compose browser/runtime smoke (local Phase 11/12 remains authoritative E2E)
+- Deployment / CD
+- AWS
+- Registry image publishing
+- Production secrets (CI DB password is ephemeral and non-secret)
+
+Definition of Done:
+- ✅ Push/PR automatically validate C build, safe Python `--all`, Java, and frontend
+- ✅ Real PostgreSQL/Redis integrations execute in CI
+- ✅ Docker images build; Compose config validates
+- ✅ Privileged/manual tests remain excluded
+- ✅ No deployment / AWS implemented yet
 
 ---
 
 ## Phase 14 — Cloud / AWS
 Only after the local system is stable.
+
+**Status: NOT STARTED**
+
 
 Possible components:
 - backend deployment
@@ -1270,7 +1306,7 @@ I am building a portfolio project called NetVerify.
 
 Read PROJECT_SPEC.md before doing anything.
 
-NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (optional PostgreSQL persistence for definitions and run history; optional Redis Streams + distributed API/worker roles; Docker Compose for the reproducible stack including an nginx React dashboard). CI/CD and AWS come later.
+NetVerify is a network verification and test automation platform. C is used for low-level TCP client/server components, Python for test automation and failure injection, and Java/Spring Boot for the control plane (optional PostgreSQL persistence for definitions and run history; optional Redis Streams + distributed API/worker roles; Docker Compose for the reproducible stack including an nginx React dashboard). GitHub Actions CI validates the stack; deployment/CD and AWS come later.
 
 This is an educational Software Engineering project. Do not build the whole project for me. Work one milestone at a time, explain architectural decisions, and make sure I can understand and explain the code in an interview.
 
@@ -1292,10 +1328,10 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 12 — React + TypeScript Dashboard (COMPLETE)`
+`Phase 13 — CI/CD (COMPLETE — CI)`
 
 Next phase:
-`Phase 13 — CI/CD (NOT STARTED)`
+`Phase 14 — Cloud / AWS (NOT STARTED)`
 
 Completed:
 
@@ -1592,11 +1628,23 @@ Completed:
   (no Spring CORS); SPA `try_files`
 - Verified: compose up; dashboard create/run basic_ping_pong → PASSED;
   metrics/logs; deep link `/tests/<uuid>`; PG volume survives `compose down`
-- Deferred: charts, auth, WebSocket logs, run-specific artifact APIs,
-  CI/CD (Phase 13), AWS
+- Deferred: charts, auth, WebSocket logs, run-specific artifact APIs, AWS
+
+**Phase 13 — CI/CD**
+- COMPLETE — **CI only** (CD/deployment deferred to Phase 14)
+- M1: baseline jobs `c-python`, `java`, `frontend` on `ubuntu-24.04`
+- M2: `java-integration` with Postgres 18 + Redis 8 services;
+  ephemeral CI credentials; `make` + `NETVERIFY_REPO_ROOT`;
+  verified 248/0/0/0 skipped
+- M3: `docker` job builds `netverify-app:ci` + `netverify-dashboard:ci`;
+  `compose config` via temporary `.env` from `.env.example` (trap cleanup);
+  no registry push; no `compose up`
+- M4: docs / closure
+- Exclusions: latency_injection/netem, full Compose browser smoke,
+  deployment, AWS, registry publishing, production secrets
 
 Next:
-- Begin Phase 13 — CI/CD
+- Begin Phase 14 — Cloud / AWS
 
 Last updated:
 2026-10-13

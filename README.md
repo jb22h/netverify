@@ -17,13 +17,14 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 10** — Queue and Distributed Workers: complete
 - **Phase 11** — Docker: complete
 - **Phase 12** — React + TypeScript Dashboard: complete
+- **Phase 13** — CI/CD (CI): complete
 
-**Current phase:** Phase 12 — React + TypeScript Dashboard: complete
-**Next phase:** Phase 13 — CI/CD
+**Current phase:** Phase 13 — CI/CD (CI): complete
+**Next phase:** Phase 14 — Cloud / AWS
 
-Phase 8–11 provide the Spring Boot control plane, PostgreSQL persistence, Redis Streams workers, and the Docker Compose stack. Phase 12 adds a React + TypeScript dashboard (Vite, native `fetch`, React Router) and an nginx container that serves the UI and proxies same-origin `/api` to the API.
+Phase 8–12 provide the Spring Boot control plane, PostgreSQL, Redis Streams workers, Docker Compose, and the React dashboard. Phase 13 adds GitHub Actions **CI** (build/test/image validation). **Deployment / CD and AWS are not implemented.**
 
-HTTP scenarios (dashboard + API): `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, `concurrent_load`. `latency_injection` is intentionally not exposed (requires privileged `tc`/`netem`). CI/CD and AWS are not part of Phase 12.
+HTTP scenarios (dashboard + API): `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, `concurrent_load`. `latency_injection` is intentionally not exposed via HTTP and is excluded from CI (privileged `tc`/`netem`).
 
 ## Quick start (Docker Compose)
 
@@ -384,7 +385,7 @@ npm run dev     # http://127.0.0.1:5173
 - Result, metrics, and logs endpoints expose **latest-run** artifacts only (no `GET /runs/{runId}` detail)
 - No authentication
 - No WebSocket / live log streaming
-- CI/CD and AWS are **not** implemented
+- AWS / deployment (CD) are **not** implemented
 
 ### Verified Compose + dashboard smoke
 
@@ -403,6 +404,51 @@ Phase 11 introduced the app image (`netverify-app:local`) and Compose `postgres`
 Worker-only: `NETVERIFY_REPO_ROOT=/opt/netverify` inside the worker container. Worker IDs are PG lease owners and Redis consumer names — use the `multiworker` profile for a second worker, not blind `compose scale`.
 
 Phase 10 semantics inside containers are unchanged (Redis transport, PostgreSQL ownership, no transactional outbox, expired `RUNNING` → `FAILED`/`TIMEOUT`).
+
+## Continuous Integration (Phase 13)
+
+GitHub Actions workflow: [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+**Triggers:** push to `main`, and all pull requests.
+
+**Runner:** `ubuntu-24.04`.
+
+**Actions:** `actions/checkout@v7`, `actions/setup-java@v6` (Temurin 21), `actions/setup-node@v7` (Node 24).
+
+| Job | Validates |
+|-----|-----------|
+| `c-python` | `make` + `python3 automation/runner.py --all` (safe suite; no `latency_injection` / sudo tc/netem) |
+| `java` | `mvn -B test` in `control-plane` **without** DB/Redis env (env-gated ITs skip here) |
+| `frontend` | `npm ci`, `npm run lint`, `npm run build` |
+| `java-integration` | Postgres **18** + Redis **8** service containers (healthchecked); ephemeral CI DB credentials; `make` then `mvn -B test` with `NETVERIFY_*` + `NETVERIFY_REPO_ROOT` so PG/Redis/worker/real-runner ITs **run** |
+| `docker` | `docker build` → `netverify-app:ci` and `netverify-dashboard:ci`; `docker compose config --quiet` via temporary `.env` from `.env.example` (cleaned with `trap`); image inspect; **no** registry push, **no** `compose up` |
+
+Verified on GitHub Actions: full five-job green run (including `java-integration` **248** tests, **0** failures / errors / skipped).
+
+**Not in CI:** privileged `latency_injection`; full Compose browser/runtime smoke (local Phase 11/12 Compose verification remains the E2E authority); deployment, AWS, image registry publishing, production secrets.
+
+### Local equivalents
+
+```bash
+# c-python
+make
+python3 automation/runner.py --all
+
+# java (DB/Redis-free baseline; ITs skip without env)
+cd control-plane && mvn -B test && cd ..
+
+# frontend
+cd frontend && npm ci && npm run lint && npm run build && cd ..
+
+# docker validation (no compose up)
+docker build -t netverify-app:ci .
+docker build -t netverify-dashboard:ci ./frontend
+cp .env.example .env
+docker compose config --quiet
+rm -f .env
+```
+
+For local service-backed Maven ITs, point `NETVERIFY_DB_*`, `NETVERIFY_REDIS_*`, and `NETVERIFY_REPO_ROOT` at a running Postgres/Redis and a built repo root (same contract as the `java-integration` job).
 
 ## Clean
 
