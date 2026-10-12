@@ -133,3 +133,32 @@ jobs:
       - name: Maven test with PostgreSQL and Redis
         working-directory: control-plane
         run: mvn -B test
+
+  docker:
+    name: docker
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Docker versions
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Build application image
+        run: docker build -t netverify-app:ci .
+
+      - name: Build dashboard image
+        run: docker build -t netverify-dashboard:ci ./frontend
+
+      - name: Validate Compose configuration
+        run: |
+          trap 'rm -f .env' EXIT
+          cp .env.example .env
+          docker compose config --quiet
+
+      - name: Inspect built images
+        run: |
+          docker image inspect netverify-app:ci >/dev/null
+          docker image inspect netverify-dashboard:ci >/dev/null
