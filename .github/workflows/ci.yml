@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  c-python:
+    name: c-python
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Tool versions
+        run: |
+          gcc --version
+          make --version
+          python3 --version
+
+      - name: Build C binaries
+        run: make
+
+      - name: Run safe Python automation suite
+        run: python3 automation/runner.py --all
+
+  java:
+    name: java
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Tool versions
+        run: |
+          java -version
+          mvn --version
+
+      - name: Maven test
+        working-directory: control-plane
+        run: mvn -B test
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Tool versions
+        working-directory: frontend
+        run: |
+          node --version
+          npm --version
+
+      - name: Install, lint, and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run build
