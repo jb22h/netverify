@@ -1,4 +1,4 @@
-import { ApiError, type ErrorResponseBody } from './types'
+import { ApiError, isAbortError, type ErrorResponseBody } from './types'
 
 async function parseError(response: Response): Promise<ApiError> {
   let message = response.statusText || `HTTP ${response.status}`
@@ -33,6 +33,9 @@ export async function apiRequest<T>(
       },
     })
   } catch (cause) {
+    if (isAbortError(cause)) {
+      throw cause
+    }
     const reason =
       cause instanceof Error && cause.message
         ? cause.message

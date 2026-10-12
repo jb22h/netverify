@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { ApiError } from '../api/types'
 import type { TestResponse } from '../api/types'
 import { listTests } from '../api/testsApi'
@@ -6,6 +7,7 @@ import { EmptyState } from '../components/EmptyState'
 import { ErrorBanner } from '../components/ErrorBanner'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { StatusBadge } from '../components/StatusBadge'
+import { TestCreateForm } from '../components/TestCreateForm'
 
 export function TestListPage() {
   const [tests, setTests] = useState<TestResponse[] | null>(null)
@@ -61,6 +63,10 @@ export function TestListPage() {
         </p>
       </header>
 
+      <TestCreateForm />
+
+      <h2 className="section-heading">Existing tests</h2>
+
       {loading ? <LoadingBlock label="Loading tests…" /> : null}
 
       {!loading && error ? (
@@ -75,7 +81,7 @@ export function TestListPage() {
       {!loading && !error && tests && tests.length === 0 ? (
         <EmptyState
           title="No tests yet"
-          message="Create a test through the API; the list will appear here."
+          message="Use the form above to create your first test."
         />
       ) : null}
 
@@ -94,7 +100,11 @@ export function TestListPage() {
             <tbody>
               {tests.map((test) => (
                 <tr key={test.id}>
-                  <td data-label="Name">{test.name}</td>
+                  <td data-label="Name">
+                    <Link className="table-link" to={`/tests/${test.id}`}>
+                      {test.name}
+                    </Link>
+                  </td>
                   <td data-label="Scenario">
                     <code>{test.scenario}</code>
                   </td>
