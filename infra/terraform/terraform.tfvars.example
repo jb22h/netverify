@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars locally if you need to override defaults.
+# terraform.tfvars is gitignored — never commit secrets.
+
+project_name = "netverify"
+environment  = "portfolio"
+aws_region   = "eu-central-1"
+
+# tags = {
+#   Owner = "your-name"
+# }
