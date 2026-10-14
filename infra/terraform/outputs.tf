@@ -37,3 +37,43 @@ output "availability_zones" {
   description = "Availability zones used for public and private subnets."
   value       = local.azs
 }
+
+output "alb_security_group_id" {
+  description = "Security group ID for the Application Load Balancer."
+  value       = aws_security_group.alb.id
+}
+
+output "dashboard_security_group_id" {
+  description = "Security group ID for dashboard ECS tasks."
+  value       = aws_security_group.dashboard.id
+}
+
+output "api_security_group_id" {
+  description = "Security group ID for API ECS tasks."
+  value       = aws_security_group.api.id
+}
+
+output "worker_security_group_id" {
+  description = "Security group ID for worker ECS tasks."
+  value       = aws_security_group.worker.id
+}
+
+output "rds_security_group_id" {
+  description = "Security group ID for PostgreSQL (RDS)."
+  value       = aws_security_group.rds.id
+}
+
+output "redis_security_group_id" {
+  description = "Security group ID for Redis (ElastiCache)."
+  value       = aws_security_group.redis.id
+}
+
+output "db_subnet_group_name" {
+  description = "RDS DB subnet group name (private subnets, both AZs)."
+  value       = aws_db_subnet_group.main.name
+}
+
+output "elasticache_subnet_group_name" {
+  description = "ElastiCache subnet group name (private subnets, both AZs)."
+  value       = aws_elasticache_subnet_group.main.name
+}
