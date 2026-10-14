@@ -11,6 +11,7 @@ aws_region   = "eu-central-1"
 
 # --- Managed data plane (required before plan/apply) ---
 # db_password has no default. Set a strong local-only value; never commit it.
+# Used by the RDS resource only — never injected as an ECS container environment variable.
 db_password = "CHANGE_ME_LOCAL_ONLY"
 
 # Optional overrides (defaults shown):
@@ -20,3 +21,15 @@ db_password = "CHANGE_ME_LOCAL_ONLY"
 # db_username        = "netverify"
 # redis_engine_version = "7.1"
 # redis_node_type      = "cache.t4g.micro"
+
+# --- ECS task definitions (required before plan/apply; no defaults) ---
+# Use immutable tags such as a Git commit SHA — never "latest".
+app_image_tag       = "GIT_COMMIT_SHA"
+dashboard_image_tag = "GIT_COMMIT_SHA"
+
+# ARN of an externally populated SSM SecureString for NETVERIFY_DB_PASSWORD.
+# Do not put a real account ID, region, or password here.
+db_password_parameter_arn = "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/netverify/db/password"
+
+# Optional: single baseline worker identity (Compose uses worker-1 locally).
+# worker_id = "aws-worker-1"

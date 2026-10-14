@@ -63,3 +63,24 @@ variable "redis_node_type" {
   type        = string
   default     = "cache.t4g.micro"
 }
+
+variable "app_image_tag" {
+  description = "Immutable ECR tag for the NetVerify application image (API/worker). Typically a Git commit SHA; never default to latest."
+  type        = string
+}
+
+variable "dashboard_image_tag" {
+  description = "Immutable ECR tag for the NetVerify dashboard image. Typically a Git commit SHA; never default to latest."
+  type        = string
+}
+
+variable "db_password_parameter_arn" {
+  description = "ARN of an externally populated SSM SecureString parameter supplying NETVERIFY_DB_PASSWORD to ECS (not created by this Terraform)."
+  type        = string
+}
+
+variable "worker_id" {
+  description = "Distinct NETVERIFY_WORKER_ID for the single Phase 14 baseline worker task."
+  type        = string
+  default     = "aws-worker-1"
+}

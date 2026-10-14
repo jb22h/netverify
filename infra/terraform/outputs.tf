@@ -142,3 +142,33 @@ output "worker_log_group_name" {
   description = "CloudWatch Logs group for worker ECS tasks."
   value       = aws_cloudwatch_log_group.worker.name
 }
+
+output "dashboard_task_definition_arn" {
+  description = "ARN of the dashboard ECS task definition."
+  value       = aws_ecs_task_definition.dashboard.arn
+}
+
+output "api_task_definition_arn" {
+  description = "ARN of the API ECS task definition."
+  value       = aws_ecs_task_definition.api.arn
+}
+
+output "worker_task_definition_arn" {
+  description = "ARN of the worker ECS task definition."
+  value       = aws_ecs_task_definition.worker.arn
+}
+
+output "dashboard_task_definition_family" {
+  description = "Family name of the dashboard ECS task definition."
+  value       = aws_ecs_task_definition.dashboard.family
+}
+
+output "api_task_definition_family" {
+  description = "Family name of the API ECS task definition."
+  value       = aws_ecs_task_definition.api.family
+}
+
+output "worker_task_definition_family" {
+  description = "Family name of the worker ECS task definition."
+  value       = aws_ecs_task_definition.worker.family
+}
