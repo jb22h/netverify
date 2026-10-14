@@ -102,3 +102,43 @@ output "redis_port" {
   description = "Port of the ElastiCache Redis replication group."
   value       = aws_elasticache_replication_group.main.port
 }
+
+output "ecs_cluster_name" {
+  description = "Name of the ECS cluster."
+  value       = aws_ecs_cluster.main.name
+}
+
+output "ecs_cluster_arn" {
+  description = "ARN of the ECS cluster."
+  value       = aws_ecs_cluster.main.arn
+}
+
+output "service_connect_namespace_arn" {
+  description = "ARN of the Cloud Map HTTP namespace used for ECS Service Connect."
+  value       = aws_service_discovery_http_namespace.main.arn
+}
+
+output "ecs_task_execution_role_arn" {
+  description = "ARN of the ECS task execution role (ECR pull, awslogs)."
+  value       = aws_iam_role.ecs_task_execution.arn
+}
+
+output "ecs_task_role_arn" {
+  description = "ARN of the ECS application task role (no attached policies yet)."
+  value       = aws_iam_role.ecs_task.arn
+}
+
+output "dashboard_log_group_name" {
+  description = "CloudWatch Logs group for dashboard ECS tasks."
+  value       = aws_cloudwatch_log_group.dashboard.name
+}
+
+output "api_log_group_name" {
+  description = "CloudWatch Logs group for API ECS tasks."
+  value       = aws_cloudwatch_log_group.api.name
+}
+
+output "worker_log_group_name" {
+  description = "CloudWatch Logs group for worker ECS tasks."
+  value       = aws_cloudwatch_log_group.worker.name
+}
