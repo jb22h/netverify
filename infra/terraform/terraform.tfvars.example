@@ -8,3 +8,15 @@ aws_region   = "eu-central-1"
 # tags = {
 #   Owner = "your-name"
 # }
+
+# --- Managed data plane (required before plan/apply) ---
+# db_password has no default. Set a strong local-only value; never commit it.
+db_password = "CHANGE_ME_LOCAL_ONLY"
+
+# Optional overrides (defaults shown):
+# db_engine_version  = "18.6"
+# db_instance_class  = "db.t4g.micro"
+# db_name            = "netverify"
+# db_username        = "netverify"
+# redis_engine_version = "7.1"
+# redis_node_type      = "cache.t4g.micro"

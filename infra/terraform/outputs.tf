@@ -77,3 +77,28 @@ output "elasticache_subnet_group_name" {
   description = "ElastiCache subnet group name (private subnets, both AZs)."
   value       = aws_elasticache_subnet_group.main.name
 }
+
+output "rds_address" {
+  description = "Hostname of the RDS PostgreSQL instance."
+  value       = aws_db_instance.main.address
+}
+
+output "rds_port" {
+  description = "Port of the RDS PostgreSQL instance."
+  value       = aws_db_instance.main.port
+}
+
+output "rds_database_name" {
+  description = "Initial database name on the RDS PostgreSQL instance."
+  value       = aws_db_instance.main.db_name
+}
+
+output "redis_primary_endpoint" {
+  description = "Primary endpoint address of the ElastiCache Redis replication group."
+  value       = aws_elasticache_replication_group.main.primary_endpoint_address
+}
+
+output "redis_port" {
+  description = "Port of the ElastiCache Redis replication group."
+  value       = aws_elasticache_replication_group.main.port
+}
