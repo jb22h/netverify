@@ -172,3 +172,38 @@ output "worker_task_definition_family" {
   description = "Family name of the worker ECS task definition."
   value       = aws_ecs_task_definition.worker.family
 }
+
+output "alb_dns_name" {
+  description = "Public DNS name of the Application Load Balancer."
+  value       = aws_lb.main.dns_name
+}
+
+output "alb_arn" {
+  description = "ARN of the Application Load Balancer."
+  value       = aws_lb.main.arn
+}
+
+output "dashboard_target_group_arn" {
+  description = "ARN of the dashboard ALB target group."
+  value       = aws_lb_target_group.dashboard.arn
+}
+
+output "dashboard_url" {
+  description = "HTTP URL for the public dashboard (HTTP only; no HTTPS yet)."
+  value       = "http://${aws_lb.main.dns_name}"
+}
+
+output "dashboard_service_name" {
+  description = "Name of the dashboard ECS service."
+  value       = aws_ecs_service.dashboard.name
+}
+
+output "api_service_name" {
+  description = "Name of the API ECS service."
+  value       = aws_ecs_service.api.name
+}
+
+output "worker_service_name" {
+  description = "Name of the worker ECS service."
+  value       = aws_ecs_service.worker.name
+}
