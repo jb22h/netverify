@@ -18,11 +18,12 @@ NetVerify is a network verification and test automation platform that runs repea
 - **Phase 11** — Docker: complete
 - **Phase 12** — React + TypeScript Dashboard: complete
 - **Phase 13** — CI/CD (CI): complete
+- **Phase 14** — Cloud / AWS: **IN PROGRESS / DEPLOYMENT DEFERRED** (offline Terraform through M4d; no AWS account, no plan/apply)
 
-**Current phase:** Phase 13 — CI/CD (CI): complete
-**Next phase:** Phase 14 — Cloud / AWS
+**Current phase:** Phase 14 — Cloud / AWS (**IN PROGRESS / DEPLOYMENT DEFERRED**)
+**Next:** Resume Phase 14 with a real AWS account (first plan/apply + smoke) — see below
 
-Phase 8–12 provide the Spring Boot control plane, PostgreSQL, Redis Streams workers, Docker Compose, and the React dashboard. Phase 13 adds GitHub Actions **CI** (build/test/image validation). **Deployment / CD and AWS are not implemented.**
+Phase 8–12 provide the Spring Boot control plane, PostgreSQL, Redis Streams workers, Docker Compose, and the React dashboard. Phase 13 adds GitHub Actions **CI**. Phase 14 defines offline AWS Terraform under `infra/terraform/` but **has not deployed any cloud resources**.
 
 HTTP scenarios (dashboard + API): `basic_ping_pong`, `connect_fail_no_server`, `server_crash_mid_session`, `concurrent_load`. `latency_injection` is intentionally not exposed via HTTP and is excluded from CI (privileged `tc`/`netem`).
 
@@ -449,6 +450,86 @@ rm -f .env
 ```
 
 For local service-backed Maven ITs, point `NETVERIFY_DB_*`, `NETVERIFY_REDIS_*`, and `NETVERIFY_REPO_ROOT` at a running Postgres/Redis and a built repo root (same contract as the `java-integration` job).
+
+## Cloud / AWS (Phase 14) — offline Terraform only
+
+**Status: IN PROGRESS / DEPLOYMENT DEFERRED.** Phase 14 is **not** COMPLETE. No AWS account is configured, no `terraform plan`/`apply` has been run, and **no cloud resources exist**.
+
+IaC lives under [`infra/terraform/`](infra/terraform/). Offline checks that have passed: `terraform fmt -check`, `terraform validate`, `git diff --check`.
+
+### Architecture (designed, not deployed)
+
+```
+Internet
+  -> public ALB (HTTP :80)
+  -> dashboard Fargate (public subnet + public IP)
+       -> API via ECS Service Connect (api:8080)
+API + worker Fargate (public subnets + public IPs)
+  -> private RDS PostgreSQL
+  -> private ElastiCache Redis
+```
+
+- **ECS:** public subnets, `assign_public_ip = true`, **no NAT Gateway**
+- **Managed data:** private subnets only
+- **Security:** only ALB has public ingress; worker has no ingress; API is not on the public ALB; RDS/Redis accept only API + worker SGs; ECS task role has no app AWS permissions; execution role has scoped `ssm:GetParameters` for future DB password injection
+
+### Completed offline milestones (M1–M4d)
+
+| Milestone | What |
+|-----------|------|
+| **M1** | Terraform foundation (versions, provider, variables, local state) |
+| **M2a** | ECR repository definitions (`*-app`, `*-dashboard`, IMMUTABLE tags) |
+| **M3a** | VPC: 2 public + 2 private subnets, IGW, public/private route tables |
+| **M3b** | Security groups + RDS/ElastiCache subnet groups |
+| **M3c** | RDS PostgreSQL + ElastiCache Redis definitions |
+| **M4a** | ECS cluster, IAM roles, CloudWatch log groups, Service Connect namespace |
+| **M4b** | Dashboard / API / worker Fargate task definitions |
+| **M4c** | Public ALB + ECS services + Service Connect wiring |
+| **M4d** | Offline deployment-readiness audit + this documentation |
+
+### Secrets contract (not yet bootstrapped in AWS)
+
+- No real secret is committed. `terraform.tfvars` is gitignored; example file uses placeholders only.
+- RDS currently takes `var.db_password` (sensitive Terraform variable).
+- ECS will inject `NETVERIFY_DB_PASSWORD` from an **external** SSM SecureString (`var.db_password_parameter_arn`).
+- Those two values **must be synchronized** before a real deployment, or tasks cannot authenticate to RDS.
+- After a future apply, sensitive values may exist in **Terraform state** (currently local-only; remote backend deferred).
+
+### Cost-aware portfolio choices (not free)
+
+AWS will incur cost if applied. Exact pricing is unverified. Design choices that limit spend:
+
+- no NAT Gateway
+- single-AZ RDS; single-node Redis (no failover)
+- one worker (`desired_count = 1`, fixed worker ID)
+- no autoscaling
+- short CloudWatch log retention (7 days)
+- HTTP-only baseline (no ACM/HTTPS yet)
+- teardown-friendly settings (`deletion_protection = false`, `skip_final_snapshot = true`, etc.)
+
+### Deferred blockers
+
+- no AWS account / credentials
+- no real ECR image push
+- external SSM SecureString not created
+- regional engine/class compatibility not API-verified
+- no `terraform plan` / `apply`
+- no ALB / Service Connect runtime verification
+- no end-to-end cloud smoke
+- no GitHub OIDC CD
+- no HTTPS / ACM / Route53
+- local Terraform state only
+
+### Resume Phase 14 checklist
+
+1. Create/secure AWS account.
+2. Verify region/service compatibility (e.g. RDS/ElastiCache engine + class in the chosen region).
+3. Establish secret/bootstrap strategy (same password in `db_password` and the SSM SecureString).
+4. Build/push **amd64** images with **immutable** tags (never `latest`).
+5. Run first `terraform plan` and review cost/security.
+6. Controlled `apply`.
+7. Run distributed `basic_ping_pong` smoke via the ALB dashboard URL.
+8. Add GitHub OIDC/CD only after manual deployment works.
 
 ## Clean
 

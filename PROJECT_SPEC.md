@@ -1055,18 +1055,94 @@ Definition of Done:
 ## Phase 14 — Cloud / AWS
 Only after the local system is stable.
 
-**Status: NOT STARTED**
+**Status: IN PROGRESS / DEPLOYMENT DEFERRED**
 
+Phase 14 is **not** fully COMPLETE. Offline Terraform under `infra/terraform/` defines the portfolio AWS architecture through M4d. There is **no** AWS account in use, **no** `terraform plan`/`apply` has been run, and **no** cloud resources exist.
 
-Possible components:
-- backend deployment
-- remote database
-- remote Redis
-- remote worker
-- logs/monitoring
-- object storage for large reports
+### Architecture (designed, not deployed)
 
-Do NOT move to AWS too early.
+```
+Internet
+  -> public ALB (HTTP :80)
+  -> dashboard Fargate (public subnet + public IP)
+       -> API via ECS Service Connect (api:8080)
+API + worker Fargate (public subnets + public IPs)
+  -> private RDS PostgreSQL
+  -> private ElastiCache Redis
+```
+
+| Plane | Placement |
+|-------|-----------|
+| ECS tasks (dashboard, API, worker) | Public subnets, `assign_public_ip = true`, **no NAT Gateway** |
+| RDS + ElastiCache | Private subnets only |
+| Public ingress | ALB TCP/80 only |
+| Worker | No ingress; not on ALB |
+| API | Service Connect only (not attached to public ALB) |
+| RDS / Redis | Ingress from API + worker security groups only |
+
+IAM: ECS **task role** has no application AWS permissions. ECS **execution role** has the managed task-execution policy plus scoped `ssm:GetParameters` on a future DB-password parameter ARN.
+
+### Milestone summary (M1–M4d completed offline)
+
+- **M1** — Terraform foundation (versions, provider, variables, local state)
+- **M2a** — ECR repositories (`${project}-app`, `${project}-dashboard`; IMMUTABLE tags; scan on push; AES256)
+- **M3a** — VPC networking (2 AZs; 2 public + 2 private subnets; IGW; public + private route tables; no NAT)
+- **M3b** — Security groups + RDS/ElastiCache subnet groups (private subnets)
+- **M3c** — RDS PostgreSQL + ElastiCache Redis OSS definitions
+- **M4a** — ECS cluster, execution + task IAM roles, CloudWatch log groups (7-day retention), Service Connect HTTP namespace
+- **M4b** — Dashboard / API / worker Fargate task definitions (Compose runtime contract; DB password via ECS `secrets`)
+- **M4c** — Public ALB + ECS services + Service Connect (`api:8080` for nginx)
+- **M4d** — Offline deployment-readiness audit + documentation checkpoint
+
+Offline verification recorded: `terraform fmt -check`, `terraform validate`, `git diff --check`.
+
+### Secrets contract
+
+- No real secret is committed (`*.tfvars` gitignored; example uses placeholders).
+- RDS currently takes `var.db_password` (sensitive Terraform variable).
+- ECS will take `NETVERIFY_DB_PASSWORD` from an **external** SSM SecureString (`var.db_password_parameter_arn`).
+- Those values **must be synchronized** before real deployment.
+- After a future apply, sensitive Terraform values may exist in Terraform state (currently **local** state only; remote backend deferred).
+
+### Cost-aware portfolio choices
+
+AWS is **not** free. Exact pricing is unverified. Design choices that limit spend:
+
+- no NAT Gateway
+- single-AZ RDS; single-node Redis (no failover / Multi-AZ)
+- one worker (`desired_count = 1`, fixed `NETVERIFY_WORKER_ID`)
+- no autoscaling
+- short CloudWatch retention (7 days)
+- HTTP-only baseline (no ACM / HTTPS yet)
+- teardown-friendly settings (e.g. `deletion_protection = false`, `skip_final_snapshot = true`, ECR `force_delete`)
+
+### Deferred / blockers (before real deployment)
+
+- no AWS account / credentials
+- no real ECR image push
+- external SSM SecureString not created
+- regional engine/class compatibility not API-verified
+- no `terraform plan` / `apply`
+- no ALB / Service Connect runtime verification
+- no end-to-end cloud smoke
+- no GitHub OIDC CD
+- no HTTPS / ACM / Route53
+- local Terraform state only
+
+### Resume Phase 14 checklist
+
+1. Create/secure AWS account.
+2. Verify region/service compatibility.
+3. Establish secret/bootstrap strategy (same password for RDS var + SSM SecureString).
+4. Build/push amd64 images with immutable tags.
+5. Run first `terraform plan` and review cost/security.
+6. Controlled `apply`.
+7. Run distributed `basic_ping_pong` smoke via the ALB.
+8. Add GitHub OIDC/CD only after manual deployment works.
+
+Possible later components (still deferred): object storage for large reports; HTTPS/domain; remote state/locking; worker scale-out with distinct IDs.
+
+Do NOT treat offline Terraform as a live cloud system.
 
 ---
 
@@ -1328,10 +1404,10 @@ Next goal: [WRITE THE NEXT SMALL GOAL HERE]
 Update this section as the project advances.
 
 Current phase:
-`Phase 13 — CI/CD (COMPLETE — CI)`
+`Phase 14 — Cloud / AWS (IN PROGRESS / DEPLOYMENT DEFERRED)`
 
-Next phase:
-`Phase 14 — Cloud / AWS (NOT STARTED)`
+Next:
+`Resume Phase 14 — AWS account bootstrap, first plan/apply, cloud smoke`
 
 Completed:
 
@@ -1643,11 +1719,37 @@ Completed:
 - Exclusions: latency_injection/netem, full Compose browser smoke,
   deployment, AWS, registry publishing, production secrets
 
+**Phase 14 — Cloud / AWS**
+- **IN PROGRESS / DEPLOYMENT DEFERRED** (not fully COMPLETE)
+- Offline Terraform under `infra/terraform/` through M4d; no AWS account;
+  no plan/apply; no cloud resources
+- M1: Terraform foundation (local state)
+- M2a: ECR definitions (IMMUTABLE tags)
+- M3a: VPC (2 public + 2 private; IGW; no NAT)
+- M3b: security groups + managed-data subnet groups
+- M3c: RDS PostgreSQL + ElastiCache Redis definitions
+- M4a: ECS cluster + IAM + CloudWatch logs + Service Connect namespace
+- M4b: dashboard/API/worker Fargate task definitions
+- M4c: public ALB + ECS services + Service Connect (`api:8080`)
+- M4d: offline deployment-readiness audit + docs
+- Architecture: Internet → ALB → dashboard Fargate → API via Service Connect;
+  API+worker → private RDS/Redis; ECS public subnets + public IPs
+- Secrets: `var.db_password` (RDS) vs external SSM ARN (ECS) must stay in sync;
+  no real secret committed; state remains local until remote backend
+- Deferred blockers: AWS account, ECR push, SSM SecureString, regional
+  engine/class API check, plan/apply, runtime ALB/Service Connect verify,
+  cloud smoke, OIDC CD, HTTPS/ACM/Route53, remote state
+- Cost-aware: no NAT; single-AZ RDS; single-node Redis; one worker; no
+  autoscaling; 7-day logs; HTTP only; teardown-friendly settings
+- Resume checklist: account → region check → secrets bootstrap → amd64
+  immutable image push → plan → controlled apply → basic_ping_pong smoke →
+  OIDC/CD last
+
 Next:
-- Begin Phase 14 — Cloud / AWS
+- Resume Phase 14 with a real AWS account (bootstrap + first plan/apply + smoke)
 
 Last updated:
-2026-10-13
+2026-10-14
 
 ---
 
